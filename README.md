@@ -1,19 +1,37 @@
 # Lawful Overlay
 
-A Python-based overlay application designed to enhance your screen with real-time information and notifications.
+A Python-based Discord chat overlay application designed to enhance your screen with real-time messages from Discord.
 
 ## Features
 
-- Real-time information tracking
-- Customizable overlay interface
+- Real-time Discord chat messages display
+- Customizable Undertale-style interface
 - Hotkey support for quick actions
 - Cross-application compatibility
+- Discord bot integration
 
 ## Prerequisites
 
 - Python 3.8 or higher
 - Windows operating system
+- Discord bot token (see Discord Setup below)
 - Required Python packages (will be installed automatically)
+
+## Discord Setup
+
+1. Create a Discord bot:
+   - Go to https://discord.com/developers/applications
+   - Click "New Application"
+   - Give your application a name
+   - Go to "Bot" tab and click "Add Bot"
+   - Copy your bot token
+
+2. Configure your bot:
+   - Go to "OAuth2" → "URL Generator"
+   - Select "bot" scope
+   - Add these permissions: "Read Messages", "Read Message History"
+   - Copy the generated URL and invite the bot to your server
+
 
 ## Installation
 
@@ -28,11 +46,15 @@ A Python-based overlay application designed to enhance your screen with real-tim
 
 1. Launch the overlay application:
    ```bash
-   python main.py
+   python app.py
    ```
 
 2. The overlay will appear on your screen. You can:
    - Move it to any position by dragging the window
+   - Resize it using the corners
+   - Configure settings through the settings menu
+
+3. The overlay will display messages from your Discord server in an Undertale-style text box.
    - Resize it using the corners
    - Configure settings through the settings menu
 
