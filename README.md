@@ -1,88 +1,106 @@
-# Lawful Overlay
+# LawfulOverlay
 
-A Python-based Discord chat overlay application designed to enhance your screen with real-time messages from Discord.
+A transparent, always-on-top Discord chat overlay for streamers and gamers.
 
-## Features
+## Architecture
 
-- Real-time Discord chat messages display
-- Customizable Undertale-style interface
-- Hotkey support for quick actions
-- Cross-application compatibility
-- Discord bot integration
+```
+┌─────────────────────────────────┐          ┌──────────────────────────┐
+│  SERVER  (docker-compose.yml)   │          │  CLIENT  (app.py)        │
+│                                 │          │                          │
+│  server/bot.py                  │ WebSocket│  Tkinter overlay         │
+│  ─ Discord bot (discord.py)     │◄────────►│  ─ connects to server    │
+│  ─ WebSocket broadcaster        │  ws://   │  ─ displays messages     │
+│                                 │          │  ─ NO bot token          │
+└─────────────────────────────────┘          └──────────────────────────┘
+```
 
-## Prerequisites
+**The bot token and Discord credentials live exclusively on the server.**
+The client only opens a WebSocket connection and renders incoming text.
 
-- Python 3.8 or higher
-- Windows operating system
-- Discord bot token (see Discord Setup below)
-- Required Python packages (will be installed automatically)
+---
 
-## Discord Setup
+## Quick Start
 
-1. Create a Discord bot:
-   - Go to https://discord.com/developers/applications
-   - Click "New Application"
-   - Give your application a name
-   - Go to "Bot" tab and click "Add Bot"
-   - Copy your bot token
+### 1 · Set up the server
 
-2. Configure your bot:
-   - Go to "OAuth2" → "URL Generator"
-   - Select "bot" scope
-   - Add these permissions: "Read Messages", "Read Message History"
-   - Copy the generated URL and invite the bot to your server
+```bash
+cd server
+cp .env.example .env
+# Edit .env — fill in DISCORD_BOT_TOKEN, TARGET_USER_IDS, TARGET_SERVER_ID
+```
 
+> **Discord Developer Portal requirements**
+> - Under your bot's settings → *Privileged Gateway Intents* → enable **Message Content Intent**.
+> - The bot only needs the `messages` and `guilds` intents; it does **not** request Presence or Server Members intents.
+> - If your bot is in fewer than 100 servers, no verification is required.
 
-## Installation
+### 2 · Start the server with Docker Compose
 
-1. Clone this repository to your local machine
-2. Open a terminal in the project directory
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+docker compose up -d
+# View logs
+docker compose logs -f lawful-overlay-bot
+```
 
-## Usage
+### 3 · Run the client
 
-1. Launch the overlay application:
-   ```bash
-   python app.py
-   ```
+```bash
+# Install client dependencies once
+pip install -r requirements.txt
 
-2. The overlay will appear on your screen. You can:
-   - Move it to any position by dragging the window
-   - Resize it using the corners
-   - Configure settings through the settings menu
+# Start the overlay
+python app.py
+```
 
-3. The overlay will display messages from your Discord server in an Undertale-style text box.
-   - Resize it using the corners
-   - Configure settings through the settings menu
+The client connects to `ws://127.0.0.1:8765` by default.
+You can change the URL via the ⚙ settings button in the overlay.
 
-3. Use the default hotkeys:
-   - `Ctrl + Shift + O`: Toggle overlay visibility
-   - `Ctrl + Shift + S`: Open settings menu
-   - `Ctrl + Shift + Q`: Quit the application
+---
 
-## Configuration
+## Server Configuration (`server/.env`)
 
-The application can be configured through:
-1. The settings menu
-2. The `config.json` file in the application directory
+| Variable            | Required | Description                                    |
+|---------------------|----------|------------------------------------------------|
+| `DISCORD_BOT_TOKEN` | ✅       | Bot token from the Discord Developer Portal    |
+| `TARGET_USER_IDS`   | ✅       | Comma-separated Discord user IDs to monitor    |
+| `TARGET_SERVER_ID`  | ✅       | Numeric ID of the Discord guild (server)        |
+| `WS_HOST`           | ❌       | WebSocket bind address (default `0.0.0.0`)     |
+| `WS_PORT`           | ❌       | WebSocket port (default `8765`)                |
 
-## Troubleshooting
+---
 
-- If the overlay doesn't appear, ensure you have administrator privileges
-- If hotkeys aren't working, check for conflicts with other applications
-- If you encounter any errors, please check the logs in the `logs` directory
+## Security & Policy Compliance
 
-## Contributing
+| Area | What we do |
+|---|---|
+| **Token safety** | Bot token is read from `.env` on the server only; it is never transmitted to clients |
+| **Minimal intents** | Only `message_content` privileged intent is requested — no presence, no member list |
+| **Non-root container** | Docker image runs under a dedicated `overlay` system user |
+| **No capabilities** | All Linux capabilities dropped (`cap_drop: ALL`) |
+| **Read-only filesystem** | Container filesystem is read-only; only `/tmp` is writable |
+| **Localhost-only port** | Docker Compose binds the port to `127.0.0.1` only by default |
+| **Resource limits** | CPU cap 0.5 core, memory cap 256 MB |
+| **No privilege escalation** | `no-new-privileges:true` security option |
+| **Secrets not in VCS** | `.env` / `server/.env` are in `.gitignore` |
+| **Rate limiting** | The bot does not call any Discord API endpoints beyond reading messages — no spam risk |
 
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
+---
+
+## Project Structure
+
+```
+LawfulOverlay/
+├── app.py                  # Desktop overlay client (no bot token)
+├── requirements.txt        # Client dependencies
+├── docker-compose.yml      # Orchestrates the server container
+└── server/
+    ├── bot.py              # Discord bot + WebSocket broadcaster
+    ├── requirements.txt    # Server dependencies
+    ├── Dockerfile          # Secure, non-root image definition
+    └── .env.example        # Template — copy to .env and fill in values
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT

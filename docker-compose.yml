@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  lawful-overlay-bot:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: lawful-overlay-bot:latest
+    container_name: lawful-overlay-bot
+    restart: unless-stopped
+
+    # Load secrets from a .env file that is NEVER committed to source control
+    env_file:
+      - ./server/.env
+
+    ports:
+      # Expose the WebSocket port to the host so the desktop client can connect.
+      # Change to "127.0.0.1:8765:8765" to restrict to localhost only (recommended
+      # if the client runs on the same machine).
+      - "127.0.0.1:8765:8765"
+
+    # Read-only filesystem — the bot doesn't need to write anything
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    # Drop ALL Linux capabilities; add back only what's necessary (none here)
+    cap_drop:
+      - ALL
+
+    # Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource limits to prevent runaway memory/CPU
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+    healthcheck:
+      # A simple TCP check: if the port is open, the server is up
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8765),2); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
