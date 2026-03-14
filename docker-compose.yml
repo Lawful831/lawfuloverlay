@@ -14,10 +14,8 @@ services:
       - ./server/.env
 
     ports:
-      # Expose the WebSocket port to the host so the desktop client can connect.
-      # Change to "127.0.0.1:8765:8765" to restrict to localhost only (recommended
-      # if the client runs on the same machine).
-      - "127.0.0.1:8765:8765"
+      # Exponemos el puerto al exterior para que el cliente pueda conectarse desde tu PC
+      - "8765:8765"
 
     # Read-only filesystem — the bot doesn't need to write anything
     read_only: true
