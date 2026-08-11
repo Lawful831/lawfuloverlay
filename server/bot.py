@@ -33,10 +33,15 @@ TARGET_USER_IDS: Set[int] = {
     if uid.strip().isdigit()
 }
 
-_raw_server_id = os.environ.get("TARGET_SERVER_ID", "")
-TARGET_SERVER_ID: int | None = (
-    int(_raw_server_id.strip()) if _raw_server_id.strip().isdigit() else None
+# Accepts a single ID or a comma-separated list, under either variable name
+_raw_server_ids = ",".join(
+    filter(None, (os.environ.get("TARGET_SERVER_IDS", ""), os.environ.get("TARGET_SERVER_ID", "")))
 )
+TARGET_SERVER_IDS: Set[int] = {
+    int(gid.strip())
+    for gid in _raw_server_ids.split(",")
+    if gid.strip().isdigit()
+}
 
 WS_HOST: str = os.environ.get("WS_HOST", "0.0.0.0")
 WS_PORT: int = int(os.environ.get("WS_PORT", "8765"))
@@ -92,7 +97,7 @@ async def ws_handler(ws: ServerConnection) -> None:
 class OverlayBotClient(discord.Client):
     """
     Minimal Discord client.
-    Only listens to messages from specific users in a specific guild.
+    Only listens to messages from specific users in specific guilds.
     Privileged intents used:
       - message_content  → required to read message body (must be enabled in Dev Portal)
     We deliberately do NOT request presences or members intents beyond default.
@@ -100,17 +105,18 @@ class OverlayBotClient(discord.Client):
 
     async def on_ready(self) -> None:
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        if TARGET_SERVER_ID:
-            guild = self.get_guild(TARGET_SERVER_ID)
-            if guild:
-                logger.info(f"Monitoring guild: {guild.name}")
-            else:
-                logger.warning(
-                    f"Guild {TARGET_SERVER_ID} not found. "
-                    "Ensure the bot is a member of the server."
-                )
+        if TARGET_SERVER_IDS:
+            for server_id in sorted(TARGET_SERVER_IDS):
+                guild = self.get_guild(server_id)
+                if guild:
+                    logger.info(f"Monitoring guild: {guild.name}")
+                else:
+                    logger.warning(
+                        f"Guild {server_id} not found. "
+                        "Ensure the bot is a member of the server."
+                    )
         else:
-            logger.warning("TARGET_SERVER_ID is not set — will match all guilds.")
+            logger.warning("TARGET_SERVER_IDS is not set — will match all guilds.")
 
         if not TARGET_USER_IDS:
             logger.warning("TARGET_USER_IDS is empty — no messages will be relayed.")
@@ -121,8 +127,8 @@ class OverlayBotClient(discord.Client):
             return
 
         # Guild filter
-        if TARGET_SERVER_ID and (
-            not message.guild or message.guild.id != TARGET_SERVER_ID
+        if TARGET_SERVER_IDS and (
+            not message.guild or message.guild.id not in TARGET_SERVER_IDS
         ):
             return
 

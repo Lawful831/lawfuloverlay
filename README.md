@@ -27,7 +27,7 @@ The client only opens a WebSocket connection and renders incoming text.
 ```bash
 cd server
 cp .env.example .env
-# Edit .env — fill in DISCORD_BOT_TOKEN, TARGET_USER_IDS, TARGET_SERVER_ID
+# Edit .env — fill in DISCORD_BOT_TOKEN, TARGET_USER_IDS, TARGET_SERVER_IDS
 ```
 
 > **Discord Developer Portal requirements**
@@ -64,7 +64,7 @@ You can change the URL via the ⚙ settings button in the overlay.
 |---------------------|----------|------------------------------------------------|
 | `DISCORD_BOT_TOKEN` | ✅       | Bot token from the Discord Developer Portal    |
 | `TARGET_USER_IDS`   | ✅       | Comma-separated Discord user IDs to monitor    |
-| `TARGET_SERVER_ID`  | ✅       | Numeric ID of the Discord guild (server)        |
+| `TARGET_SERVER_IDS` | ✅       | Comma-separated Discord guild (server) IDs to monitor. The legacy `TARGET_SERVER_ID` is still accepted and merged in |
 | `WS_HOST`           | ❌       | WebSocket bind address (default `0.0.0.0`)     |
 | `WS_PORT`           | ❌       | WebSocket port (default `8765`)                |
 
