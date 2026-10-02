@@ -76,10 +76,11 @@ def _site_name(url: str) -> str:
     return _SITE_NAMES.get(name, name)
 
 
-def humanize_links(text: str) -> str:
-    """"https://youtube.com/watch?v=x" → "Link de youtube"."""
+def humanize_links(text: str, brackets: bool = False) -> str:
+    """"https://youtube.com/watch?v=x" → "Link de youtube" (o "[Link de youtube]")."""
     def repl(m: re.Match) -> str:
-        return f"Link de {_site_name(m.group())}"
+        name = f"Link de {_site_name(m.group())}"
+        return f"[{name}]" if brackets else name
 
     return _URL_RE.sub(repl, text)
 
@@ -107,6 +108,22 @@ _MEDIA_TEXT = {
     "file": "Compartido un archivo",
 }
 
+# Etiquetas para el overlay (texto visible)
+_MEDIA_TAG = {"gif": "[GIF]", "image": "[Imagen]", "file": "[Archivo]"}
+
+
+def _join_parts(parts: list[str]) -> str:
+    return " ".join(p for p in parts if p)
+
+
+def display_text(message: discord.Message, content: str) -> str:
+    """Texto del overlay: enlaces y adjuntos etiquetados, con el texto original."""
+    parts = [humanize_links(content, brackets=True)] if content else []
+    kind = _media_kind(message, content)
+    if kind:
+        parts.append(_MEDIA_TAG[kind])
+    return _join_parts(parts)
+
 
 def speech_text(message: discord.Message, content: str) -> str:
     """
@@ -118,7 +135,7 @@ def speech_text(message: discord.Message, content: str) -> str:
     kind = _media_kind(message, content)
     if kind:
         parts.append(_MEDIA_TEXT[kind])
-    return " ".join(p for p in parts if p)
+    return _join_parts(parts)
 
 # ── WebSocket client registry ────────────────────────────────────────────────
 connected_clients: Set[ServerConnection] = set()
@@ -213,14 +230,15 @@ class OverlayBotClient(discord.Client):
         username = message.author.display_name
         content = message.clean_content.strip()  # resolves mentions and custom emoji
         speech = speech_text(message, content)
+        display = display_text(message, content)
 
-        logger.info(f"Relaying message from {username}: {(content or speech)[:80]}")
+        logger.info(f"Relaying message from {username}: {(display or speech)[:80]}")
 
         await broadcast(
             {
                 "type": "message",
                 "username": username,
-                "content": content or speech,   # never empty when only media was sent
+                "content": display or speech,   # overlay text — tagged links/media
                 "content_speech": speech,       # what the voice reads out
                 "user_id": str(message.author.id),
                 "channel": getattr(message.channel, "name", "DM"),
@@ -266,6 +284,7 @@ def _selfcheck() -> None:
     assert humanize_links("https://.") == "https://."
     assert humanize_links("a www.twitch.tv/b y https://t.co/z") == "a Link de twitch y Link de twitter"
     assert humanize_links("sin enlaces") == "sin enlaces"
+    assert humanize_links("mira https://youtube.com/x", brackets=True) == "mira [Link de youtube]"
 
     class _Att:
         def __init__(self, content_type: str | None, filename: str = "") -> None:
@@ -292,6 +311,13 @@ def _selfcheck() -> None:
     assert speech_text(_Msg([], [_Embed()]), "") == "Compartido una imagen"
     assert speech_text(_Msg([], [_Embed()]), "https://youtu.be/x") == "Link de youtube"
     assert speech_text(_Msg(), "") == ""
+
+    assert display_text(_Msg(), "mira https://youtube.com/x") == "mira [Link de youtube]"
+    assert display_text(_Msg([_Att("image/png")]), "mira esto") == "mira esto [Imagen]"
+    assert display_text(_Msg([_Att("image/gif", "a.gif")]), "") == "[GIF]"
+    assert display_text(_Msg([_Att(None, "a.pdf")]), "") == "[Archivo]"
+    assert display_text(_Msg([], [_Embed("gifv")]), "") == "[GIF]"
+    assert display_text(_Msg(), "") == ""
     print("selfcheck OK")
 
 
