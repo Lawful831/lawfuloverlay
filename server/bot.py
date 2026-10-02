@@ -7,8 +7,11 @@ Bot token and sensitive config are kept server-side only — never sent to clien
 import asyncio
 import json
 import os
+import re
+import sys
 import logging
 from typing import Set
+from urllib.parse import urlsplit
 
 import discord
 import websockets
@@ -24,7 +27,8 @@ logging.basicConfig(
 logger = logging.getLogger("lawful-overlay")
 
 # ── Config from environment ──────────────────────────────────────────────────
-BOT_TOKEN: str = os.environ["DISCORD_BOT_TOKEN"]
+# Empty means "check at startup" so the module can be imported for the self-check
+BOT_TOKEN: str = os.environ.get("DISCORD_BOT_TOKEN", "")
 
 _raw_user_ids = os.environ.get("TARGET_USER_IDS", "")
 TARGET_USER_IDS: Set[int] = {
@@ -45,6 +49,76 @@ TARGET_SERVER_IDS: Set[int] = {
 
 WS_HOST: str = os.environ.get("WS_HOST", "0.0.0.0")
 WS_PORT: int = int(os.environ.get("WS_PORT", "8765"))
+
+# ── Links / attachments → readable text ──────────────────────────────────────
+_URL_RE = re.compile(r"https?://[^\s<>]*[^\s<>.,;:!?)\]]|www\.[^\s<>]*[^\s<>.,;:!?)\]]", re.IGNORECASE)
+
+# Recognisable site names; anything else falls back to the domain label
+_SITE_NAMES: dict[str, str] = {
+    "youtu": "youtube", "youtube": "youtube", "youtube-nocookie": "youtube",
+    "x": "twitter", "twitter": "twitter", "t": "twitter",
+    "twitch": "twitch", "tiktok": "tiktok", "instagram": "instagram",
+    "discord": "discord", "reddit": "reddit", "spotify": "spotify",
+    "github": "github", "imgur": "imgur", "tenor": "tenor",
+    "facebook": "facebook", "fb": "facebook", "soundcloud": "soundcloud",
+    "steamcommunity": "steam", "steampowered": "steam", "pixiv": "pixiv",
+}
+# Second-level labels that are not the site name (bbc.co.uk → bbc)
+_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu"}
+
+
+def _site_name(url: str) -> str:
+    host = urlsplit(url if "//" in url else "//" + url).hostname or url
+    labels = host.lower().removeprefix("www.").split(".")
+    if len(labels) > 1 and labels[-2] in _SECOND_LEVEL:
+        labels = labels[:-1]
+    name = labels[-2] if len(labels) > 1 else labels[0]
+    return _SITE_NAMES.get(name, name)
+
+
+def humanize_links(text: str) -> str:
+    """"https://youtube.com/watch?v=x" → "Link de youtube"."""
+    def repl(m: re.Match) -> str:
+        return f"Link de {_site_name(m.group())}"
+
+    return _URL_RE.sub(repl, text)
+
+
+def _is_gif(att: discord.Attachment) -> bool:
+    return (att.content_type or "").lower() == "image/gif" \
+        or (att.filename or "").lower().endswith(".gif")
+
+
+def _media_kind(message: discord.Message, content: str) -> str:
+    """'gif' | 'image' | 'file' | '' — what the message carries."""
+    embeds = [] if content else message.embeds  # link previews: the text already names them
+    if any(_is_gif(a) for a in message.attachments) \
+            or any((e.type or "").lower() == "gifv" for e in embeds):
+        return "gif"
+    if any((a.content_type or "").startswith("image/") for a in message.attachments) \
+            or any(e.image or e.thumbnail for e in embeds):
+        return "image"
+    return "file" if message.attachments else ""
+
+
+_MEDIA_TEXT = {
+    "gif": "Compartido un gif",
+    "image": "Compartido una imagen",
+    "file": "Compartido un archivo",
+}
+
+
+def speech_text(message: discord.Message, content: str) -> str:
+    """
+    Text to be spoken: readable links plus an announcement for media.
+    Embed media is only announced when the message has no text of its own,
+    so a YouTube link doesn't turn into "Link de youtube Compartido una imagen".
+    """
+    parts = [humanize_links(content)] if content else []
+    kind = _media_kind(message, content)
+    if kind:
+        parts.append(_MEDIA_TEXT[kind])
+    return " ".join(p for p in parts if p)
 
 # ── WebSocket client registry ────────────────────────────────────────────────
 connected_clients: Set[ServerConnection] = set()
@@ -137,15 +211,17 @@ class OverlayBotClient(discord.Client):
             return
 
         username = message.author.display_name
-        content = message.content
+        content = message.clean_content.strip()  # resolves mentions and custom emoji
+        speech = speech_text(message, content)
 
-        logger.info(f"Relaying message from {username}: {content[:80]}")
+        logger.info(f"Relaying message from {username}: {(content or speech)[:80]}")
 
         await broadcast(
             {
                 "type": "message",
                 "username": username,
-                "content": content,
+                "content": content or speech,   # never empty when only media was sent
+                "content_speech": speech,       # what the voice reads out
                 "user_id": str(message.author.id),
                 "channel": getattr(message.channel, "name", "DM"),
             }
@@ -154,6 +230,9 @@ class OverlayBotClient(discord.Client):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main() -> None:
+    if not BOT_TOKEN:
+        raise SystemExit("DISCORD_BOT_TOKEN is not set (check server/.env)")
+
     intents = discord.Intents.default()
     intents.message_content = True  # Privileged — must be toggled ON in Dev Portal
 
@@ -170,5 +249,54 @@ async def main() -> None:
         await ws_server.wait_closed()
 
 
+def _selfcheck() -> None:
+    """python bot.py --selfcheck"""
+    assert _site_name("https://www.youtube.com/watch?v=x") == "youtube"
+    assert _site_name("https://youtu.be/x") == "youtube"
+    assert _site_name("https://music.youtube.com/x") == "youtube"
+    assert _site_name("https://x.com/a") == "twitter"
+    assert _site_name("https://t.co/z") == "twitter"
+    assert _site_name("https://open.spotify.com/track/1") == "spotify"
+    assert _site_name("https://www.bbc.co.uk/news") == "bbc"
+    assert _site_name("https://ejemplo.ar/x") == "ejemplo"
+
+    assert humanize_links("mira https://youtube.com/watch?v=x") == "mira Link de youtube"
+    assert humanize_links("mira https://youtube.com/x.") == "mira Link de youtube."
+    assert humanize_links("Link (https://youtu.be/x), ok") == "Link (Link de youtube), ok"
+    assert humanize_links("https://.") == "https://."
+    assert humanize_links("a www.twitch.tv/b y https://t.co/z") == "a Link de twitch y Link de twitter"
+    assert humanize_links("sin enlaces") == "sin enlaces"
+
+    class _Att:
+        def __init__(self, content_type: str | None, filename: str = "") -> None:
+            self.content_type = content_type
+            self.filename = filename
+
+    class _Msg:
+        def __init__(self, attachments=(), embeds=()) -> None:
+            self.attachments = list(attachments)
+            self.embeds = list(embeds)
+
+    class _Embed:
+        def __init__(self, type: str = "rich") -> None:
+            self.type = type
+            self.image = self.thumbnail = object()
+
+    assert speech_text(_Msg([_Att("image/png")]), "") == "Compartido una imagen"
+    assert speech_text(_Msg([_Att("image/gif", "a.gif")]), "") == "Compartido un gif"
+    assert speech_text(_Msg([_Att(None, "a.GIF")]), "") == "Compartido un gif"
+    assert speech_text(_Msg([_Att(None, "a.pdf")]), "") == "Compartido un archivo"
+    assert speech_text(_Msg([_Att("image/png")]), "https://youtu.be/x") == \
+        "Link de youtube Compartido una imagen"
+    assert speech_text(_Msg([], [_Embed("gifv")]), "") == "Compartido un gif"
+    assert speech_text(_Msg([], [_Embed()]), "") == "Compartido una imagen"
+    assert speech_text(_Msg([], [_Embed()]), "https://youtu.be/x") == "Link de youtube"
+    assert speech_text(_Msg(), "") == ""
+    print("selfcheck OK")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    if "--selfcheck" in sys.argv:
+        _selfcheck()
+    else:
+        asyncio.run(main())
