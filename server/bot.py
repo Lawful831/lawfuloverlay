@@ -5,13 +5,16 @@ Bot token and sensitive config are kept server-side only — never sent to clien
 """
 
 import asyncio
+import hmac
 import json
 import os
 import re
+import ssl
 import sys
+import time
 import logging
 from typing import Set
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import discord
 import websockets
@@ -48,7 +51,23 @@ TARGET_SERVER_IDS: Set[int] = {
 }
 
 WS_HOST: str = os.environ.get("WS_HOST", "0.0.0.0")
-WS_PORT: int = int(os.environ.get("WS_PORT", "8765"))
+WS_PORT: int = int(os.environ.get("WS_PORT", 8765))
+
+# ── Connection policy ────────────────────────────────────────────────────────
+# The socket is public on purpose. These limits are what keep "public" from
+# meaning "free denial of service and free read of the Discord stream".
+WS_TOKEN: str = os.environ.get("WS_TOKEN", "")
+WS_ORIGINS = {
+    o.strip().rstrip("/")
+    for o in os.environ.get("WS_ORIGINS", "").split(",")
+    if o.strip()
+}
+MAX_CLIENTS: int = int(os.environ.get("WS_MAX_CLIENTS", "25"))
+MAX_PER_IP: int = int(os.environ.get("WS_MAX_PER_IP", "3"))
+MAX_FRAME_BYTES: int = int(os.environ.get("WS_MAX_FRAME_BYTES", str(64 * 1024)))
+MAX_FRAMES_PER_S: int = int(os.environ.get("WS_MAX_FRAMES_PER_S", "20"))
+TLS_CERT: str = os.environ.get("WS_TLS_CERT", "")
+TLS_KEY: str = os.environ.get("WS_TLS_KEY", "")
 
 # ── Links / attachments → readable text ──────────────────────────────────────
 _URL_RE = re.compile(r"https?://[^\s<>]*[^\s<>.,;:!?)\]]|www\.[^\s<>]*[^\s<>.,;:!?)\]]", re.IGNORECASE)
@@ -139,18 +158,57 @@ def speech_text(message: discord.Message, content: str) -> str:
 
 # ── WebSocket client registry ────────────────────────────────────────────────
 connected_clients: Set[ServerConnection] = set()
+per_ip: dict[str, int] = {}
 clients_lock = asyncio.Lock()
 
 
-async def register(ws: ServerConnection) -> None:
+def _peer_ip(ws: ServerConnection) -> str:
+    try:
+        return ws.remote_address[0]
+    except Exception:
+        return "unknown"
+
+
+def _origin_allowed(ws: ServerConnection) -> bool:
+    """Native clients send no Origin. Browsers always do, so a foreign Origin is
+    either a hostile page or a misconfigured client; both are refused."""
+    origin = ws.request.headers.get("Origin")
+    if origin is None:
+        return True
+    return origin.rstrip("/") in WS_ORIGINS
+
+
+def _token_allowed(ws: ServerConnection) -> bool:
+    if not WS_TOKEN:
+        return False
+    query = parse_qs(urlsplit(ws.request.path).query)
+    given = (query.get("token") or [""])[0]
+    return hmac.compare_digest(given, WS_TOKEN)
+
+
+async def register(ws: ServerConnection) -> tuple[bool, str]:
+    ip = _peer_ip(ws)
     async with clients_lock:
+        if len(connected_clients) >= MAX_CLIENTS:
+            return False, "server full"
+        if per_ip.get(ip, 0) >= MAX_PER_IP:
+            return False, "too many connections from this address"
         connected_clients.add(ws)
+        per_ip[ip] = per_ip.get(ip, 0) + 1
     logger.info(f"Client connected ({ws.remote_address}). Total: {len(connected_clients)}")
+    return True, ""
 
 
 async def unregister(ws: ServerConnection) -> None:
+    ip = _peer_ip(ws)
     async with clients_lock:
-        connected_clients.discard(ws)
+        if ws in connected_clients:
+            connected_clients.discard(ws)
+            remaining = per_ip.get(ip, 1) - 1
+            if remaining > 0:
+                per_ip[ip] = remaining
+            else:
+                per_ip.pop(ip, None)
     logger.info(f"Client disconnected. Total: {len(connected_clients)}")
 
 
@@ -173,11 +231,34 @@ async def broadcast(payload: dict) -> None:
 
 # ── WebSocket handler ────────────────────────────────────────────────────────
 async def ws_handler(ws: ServerConnection) -> None:
-    await register(ws)
+    if not _origin_allowed(ws):
+        logger.warning(f"Rejected origin {ws.request.headers.get('Origin')!r} from {ws.remote_address}")
+        await ws.close(1008, "origin not allowed")
+        return
+    if not _token_allowed(ws):
+        logger.warning(f"Rejected unauthenticated client from {ws.remote_address}")
+        await ws.close(1008, "token required")
+        return
+    admitted, reason = await register(ws)
+    if not admitted:
+        logger.warning(f"Rejected client from {ws.remote_address}: {reason}")
+        await ws.close(1013, reason)
+        return
     try:
-        # Keep the connection alive; we don't expect messages from the client
+        # Clients are listeners. Anything they send is discarded, but counted and
+        # rate limited so a frame flood cannot buy CPU for free.
+        frames = 0
+        window = time.monotonic()
         async for _ in ws:
-            pass
+            frames += 1
+            now = time.monotonic()
+            if now - window >= 1.0:
+                if frames > MAX_FRAMES_PER_S:
+                    logger.warning(f"Closing {ws.remote_address}: {frames} frames in {now - window:.2f}s")
+                    await ws.close(1008, "rate limit")
+                    return
+                frames = 0
+                window = now
     except websockets.ConnectionClosed:
         pass
     finally:
@@ -248,16 +329,38 @@ class OverlayBotClient(discord.Client):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main() -> None:
-    if not BOT_TOKEN:
+    ws_only = "--ws-only" in sys.argv
+    if not WS_TOKEN:
+        raise SystemExit("WS_TOKEN is not set: refusing to expose an unauthenticated socket")
+    if not BOT_TOKEN and not ws_only:
         raise SystemExit("DISCORD_BOT_TOKEN is not set (check server/.env)")
+
+    ssl_ctx = None
+    if TLS_CERT and TLS_KEY:
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+    scheme = "wss" if ssl_ctx else "ws"
+
+    logger.info(f"Starting WebSocket server on {scheme}://{WS_HOST}:{WS_PORT} (max {MAX_CLIENTS} clients)")
+    ws_server = await ws_serve(
+        ws_handler,
+        WS_HOST,
+        WS_PORT,
+        max_size=MAX_FRAME_BYTES,
+        ping_interval=20,
+        ping_timeout=20,
+        ssl=ssl_ctx,
+    )
+
+    if ws_only:
+        logger.info("--ws-only: WebSocket server running without the Discord bot")
+        await ws_server.wait_closed()
+        return
 
     intents = discord.Intents.default()
     intents.message_content = True  # Privileged — must be toggled ON in Dev Portal
 
     bot = OverlayBotClient(intents=intents)
-
-    logger.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
-    ws_server = await ws_serve(ws_handler, WS_HOST, WS_PORT)
 
     logger.info("Starting Discord bot…")
     try:
