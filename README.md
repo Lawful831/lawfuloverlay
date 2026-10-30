@@ -56,6 +56,17 @@ python app.py
 The client connects to `ws://127.0.0.1:8765` by default.
 You can change the URL via the ⚙ settings button in the overlay.
 
+The socket requires a shared token. Put it in the URL itself:
+
+```
+ws://<host>:8765/?token=<WS_TOKEN>
+```
+
+A client that connects without it is closed immediately with code `1008`
+(`token required`). A browser page from an origin outside `WS_ORIGINS` is closed
+with `1008` (`origin not allowed`), which is what prevents cross-site WebSocket
+hijacking. Native clients send no `Origin` header and are unaffected.
+
 ---
 
 ## Server Configuration (`server/.env`)
@@ -67,6 +78,14 @@ You can change the URL via the ⚙ settings button in the overlay.
 | `TARGET_SERVER_IDS` | ✅       | Comma-separated Discord guild (server) IDs to monitor. The legacy `TARGET_SERVER_ID` is still accepted and merged in |
 | `WS_HOST`           | ❌       | WebSocket bind address (default `0.0.0.0`)     |
 | `WS_PORT`           | ❌       | WebSocket port (default `8765`)                |
+| `WS_TOKEN`          | ✅       | Shared client token; the server will not start without it |
+| `WS_ORIGINS`        | ❌       | Comma-separated browser origins allowed to connect |
+| `WS_MAX_CLIENTS`    | ❌       | Global connection cap (default `25`)           |
+| `WS_MAX_PER_IP`     | ❌       | Connections per source address (default `3`)   |
+| `WS_MAX_FRAME_BYTES`| ❌       | Largest accepted frame (default `65536`)       |
+| `WS_MAX_FRAMES_PER_S` | ❌     | Frames per second per connection before it is closed (default `20`) |
+| `WS_TLS_CERT`       | ❌       | Certificate chain; enables `wss://` in the app |
+| `WS_TLS_KEY`        | ❌       | Private key matching `WS_TLS_CERT`             |
 
 ---
 
