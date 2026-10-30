@@ -1,79 +1,42 @@
 @echo off
 :: ============================================================
 ::  LawfulOverlay — Build Script
-::  Packages app.py into a single standalone .exe
+::  Builds the overlay client into dist\LawfulOverlay.exe
+::  (and the server into dist\lawful-overlay-server.exe)
 :: ============================================================
-setlocal EnableDelayedExpansion
+setlocal
 
 set "ROOT=%~dp0.."
-set "VENV=%ROOT%\venv"
-set "PYTHON=python"
+pushd "%ROOT%"
 
 echo.
 echo  LawfulOverlay Build Script
 echo  ==========================
 echo.
 
-:: ── 1. Locate Python ──────────────────────────────────────────────────────
-where python >nul 2>&1
+where cargo >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found in PATH. Please install Python 3.10+.
-    pause
-    exit /b 1
-)
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
-echo [INFO] Using %PY_VER%
-
-:: ── 2. Create / reuse venv ────────────────────────────────────────────────
-if not exist "%VENV%\Scripts\activate.bat" (
-    echo [INFO] Creating virtual environment at %VENV% ...
-    python -m venv "%VENV%"
-)
-call "%VENV%\Scripts\activate.bat"
-
-:: ── 3. Install / upgrade dependencies ────────────────────────────────────
-echo [INFO] Installing client dependencies ...
-pip install --quiet --upgrade pip
-pip install --quiet -r "%ROOT%\requirements.txt"
-
-echo [INFO] Installing PyInstaller ...
-pip install --quiet --upgrade pyinstaller
-
-:: ── 4. Clean previous build artefacts ────────────────────────────────────
-echo [INFO] Cleaning previous build...
-if exist "%ROOT%\dist\LawfulOverlay.exe" (
-    del /f /q "%ROOT%\dist\LawfulOverlay.exe"
-)
-if exist "%ROOT%\build\LawfulOverlay" (
-    rmdir /s /q "%ROOT%\build\LawfulOverlay"
-)
-
-:: ── 5. Run PyInstaller ────────────────────────────────────────────────────
-echo [INFO] Running PyInstaller ...
-cd /d "%ROOT%"
-pyinstaller LawfulOverlay.spec --noconfirm
-
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Build failed. See output above for details.
+    echo [ERROR] cargo not found in PATH. Install Rust from https://rustup.rs
     pause
     exit /b 1
 )
 
-:: ── 6. Report ─────────────────────────────────────────────────────────────
-echo.
-echo  ╔══════════════════════════════════════════════════════╗
-echo  ║  Build complete!                                     ║
-echo  ║  Output: dist\LawfulOverlay.exe                      ║
-echo  ╚══════════════════════════════════════════════════════╝
-echo.
-
-:: Show file size
-for %%f in ("%ROOT%\dist\LawfulOverlay.exe") do (
-    set /a "SIZE_MB=%%~zf / 1048576"
-    echo  Size: !SIZE_MB! MB
+echo [INFO] Building release binaries ...
+cargo build --release --locked -p lawful-overlay -p lawful-overlay-server
+if errorlevel 1 (
+    echo [ERROR] Build failed.
+    pause
+    exit /b 1
 )
-echo.
 
+if not exist dist mkdir dist
+copy /y target\release\lawful-overlay.exe dist\LawfulOverlay.exe >nul
+copy /y target\release\lawful-overlay-server.exe dist\lawful-overlay-server.exe >nul
+
+echo.
+echo [OK] dist\LawfulOverlay.exe
+echo [OK] dist\lawful-overlay-server.exe
+echo.
+popd
 pause
 endlocal

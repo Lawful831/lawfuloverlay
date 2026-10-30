@@ -6,10 +6,10 @@ A transparent, always-on-top Discord chat overlay for streamers and gamers.
 
 ```
 ┌─────────────────────────────────┐          ┌──────────────────────────┐
-│  SERVER  (docker-compose.yml)   │          │  CLIENT  (app.py)        │
+│  SERVER  (docker-compose.yml)   │          │  CLIENT  (lawful-overlay)│
 │                                 │          │                          │
-│  server/bot.py                  │ WebSocket│  Tkinter overlay         │
-│  ─ Discord bot (discord.py)     │◄────────►│  ─ connects to server    │
+│  server/  (Rust)                │ WebSocket│  client/  (Rust, egui)   │
+│  ─ Discord bot (serenity)       │◄────────►│  ─ connects to server    │
 │  ─ WebSocket broadcaster        │  ws://   │  ─ displays messages     │
 │                                 │          │  ─ NO bot token          │
 └─────────────────────────────────┘          └──────────────────────────┘
@@ -45,16 +45,20 @@ docker compose logs -f lawful-overlay-bot
 
 ### 3 · Run the client
 
-```bash
-# Install client dependencies once
-pip install -r requirements.txt
+The whole project is Rust. Install the toolchain from <https://rustup.rs> once, then:
 
+```bash
 # Start the overlay
-python app.py
+cargo run --release -p lawful-overlay
+
+# Or build standalone executables into dist\ (Windows)
+scriptsuild.bat
 ```
 
 The client connects to `ws://127.0.0.1:8765` by default.
 You can change the URL via the ⚙ settings button in the overlay.
+The client updates itself: on start (and every 6 h) it checks the latest GitHub release and, if newer, downloads `LawfulOverlay.exe`, swaps it in and restarts. Turn it off in ⚙ → *Actualizar automáticamente*, or set `LAWFUL_OVERLAY_NO_UPDATE=1`. To ship an update, bump `version` in `client/Cargo.toml` and push a matching tag (`git tag v0.3.0 && git push origin v0.3.0`); `.github/workflows/release.yml` builds and attaches the exe.
+Settings are stored in `~/.discord_chat_overlay/client_settings.json`.
 
 The socket requires a shared token. Put it in the URL itself:
 
@@ -66,6 +70,26 @@ A client that connects without it is closed immediately with code `1008`
 (`token required`). A browser page from an origin outside `WS_ORIGINS` is closed
 with `1008` (`origin not allowed`), which is what prevents cross-site WebSocket
 hijacking. Native clients send no `Origin` header and are unaffected.
+
+---
+
+## Running the server without Docker
+
+```bash
+cd server
+cp .env.example .env      # fill it in
+cargo run --release -p lawful-overlay-server
+```
+
+Flags: `--ws-only` runs the socket without the Discord bot; `--healthcheck`
+exits 0 when the local socket accepts connections (used by the container).
+
+## Testing without Discord
+
+```bash
+scripts	est_local.bat     # mock server + overlay client, on a throwaway settings file
+cargo test                 # unit tests + socket policy tests
+```
 
 ---
 
@@ -110,14 +134,17 @@ hijacking. Native clients send no `Origin` header and are unaffected.
 
 ```
 LawfulOverlay/
-├── app.py                  # Desktop overlay client (no bot token)
-├── requirements.txt        # Client dependencies
+├── Cargo.toml              # Workspace: server + client
 ├── docker-compose.yml      # Orchestrates the server container
-└── server/
-    ├── bot.py              # Discord bot + WebSocket broadcaster
-    ├── requirements.txt    # Server dependencies
-    ├── Dockerfile          # Secure, non-root image definition
-    └── .env.example        # Template — copy to .env and fill in values
+├── client/                 # Desktop overlay (no bot token)
+│   └── src/                #   app, settings, net, tts, color, sample, config
+├── server/
+│   ├── src/                # Discord bot, WebSocket hub, text rules, config
+│   │   └── bin/mock.rs     # Mock server for testing the client
+│   ├── tests/ws.rs         # Socket policy tests (token, origin, caps, rate limit)
+│   ├── Dockerfile          # Multi-stage, non-root image
+│   └── .env.example        # Template — copy to .env and fill in values
+└── scripts/                # build.bat, test_local.bat
 ```
 
 ## License

@@ -3,8 +3,8 @@ version: "3.9"
 services:
   lawful-overlay-bot:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     image: lawful-overlay-bot:latest
     container_name: lawful-overlay-bot
     restart: unless-stopped
@@ -39,7 +39,7 @@ services:
 
     healthcheck:
       # A simple TCP check: if the port is open, the server is up
-      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8765),2); s.close()\""]
+      test: ["CMD", "/app/lawful-overlay-server", "--healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

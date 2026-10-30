@@ -1,0 +1,28 @@
+name: release
+
+# Push a tag like v0.3.0 (matching client/Cargo.toml's version) to publish a
+# release. Installed clients pick it up through their auto-updater.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo version
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' client/Cargo.toml | cut -d'"' -f2)
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != Cargo version v$v"; exit 1; }
+      - run: cargo build --release --locked -p lawful-overlay
+      - name: Stage asset
+        shell: bash
+        run: cp target/release/lawful-overlay.exe LawfulOverlay.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: LawfulOverlay.exe
