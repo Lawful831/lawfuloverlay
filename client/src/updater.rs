@@ -168,9 +168,14 @@ fn update_once(tx: &Sender<Event>, ctx: &egui::Context, exe: &Path) -> Result<()
         let _ = std::fs::remove_file(&new);
         return Err(e);
     }
-    install(exe, &new).inspect_err(|_| {
+    if let Err(e) = install(exe, &new) {
+        // Usually a folder the user can't write to; retrying soon would only
+        // download the same file again, so wait for the regular check.
         let _ = std::fs::remove_file(&new);
-    })?;
+        eprintln!("[update] {e}");
+        say(format!("No se pudo instalar {tag}: mueve LawfulOverlay a una carpeta con permisos de escritura."));
+        return Ok(());
+    }
 
     say(format!("Actualizado a {tag}. Reiniciando…"));
     std::thread::sleep(Duration::from_millis(800));

@@ -58,7 +58,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            ws_url: "ws://127.0.0.1:8765".into(),
+            // A private build can bake in its server: LAWFUL_OVERLAY_DEFAULT_WS_URL=... cargo build
+            ws_url: option_env!("LAWFUL_OVERLAY_DEFAULT_WS_URL").unwrap_or("ws://127.0.0.1:8765").into(),
             overlay_w: 440,
             overlay_h: 110,
             always_on_top: true,
