@@ -81,7 +81,7 @@ pub fn sample_bg(_x: i32, _y: i32, _size: i32) -> Option<[u8; 3]> {
 
 /// Strip the drop shadow, Windows 11 rounded corners and border so nothing but our own
 /// pixels is visible. (Transparency itself comes from the wgpu surface's
-/// pre-multiplied alpha.)
+/// pre-multiplied alpha; see `app::wgpu_options`.)
 #[cfg(windows)]
 pub fn make_transparent(title: &str) -> bool {
     use std::os::windows::ffi::OsStrExt;

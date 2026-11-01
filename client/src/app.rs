@@ -468,6 +468,45 @@ pub fn native_options(cfg: &Config) -> eframe::NativeOptions {
     if cfg.always_on_top {
         viewport = viewport.with_always_on_top();
     }
-    eframe::NativeOptions { viewport, ..Default::default() }
+    eframe::NativeOptions { viewport, wgpu_options: wgpu_options(), ..Default::default() }
+}
+
+/// Choose the GPU backend so the window reliably shows through. Left to itself
+/// wgpu takes whichever adapter it finds first: on Vulkan the window is
+/// transparent, on DX12's default HWND swapchain it is opaque, so it changed
+/// from launch to launch.
+///
+/// Vulkan comes first. It presents into the window's own redirection surface,
+/// which DWM blends with per-pixel alpha, even though drivers report only
+/// `Opaque` for it (so its surface capabilities can't be used to choose).
+/// DX12 over a DirectComposition visual is the fallback: it supports
+/// transparency, but its visual sits on top of the redirection surface, and
+/// whatever Windows leaves in there (a white fill after a resize) shows through.
+#[cfg(windows)]
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{wgpu, WgpuConfiguration, WgpuSetup};
+    use std::sync::Arc;
+
+    let mut config = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
+        setup.instance_descriptor.backends = wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        setup.instance_descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        setup.native_adapter_selector = Some(Arc::new(|adapters, _surface| {
+            let rank = |adapter: &wgpu::Adapter| {
+                let info = adapter.get_info();
+                let real_gpu = matches!(info.device_type, wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu);
+                (real_gpu, info.backend == wgpu::Backend::Vulkan, info.device_type == wgpu::DeviceType::DiscreteGpu)
+            };
+            let best = adapters.iter().max_by_key(|a| rank(a)).ok_or("no graphics adapter")?;
+            eprintln!("[gpu] {:?} {}", best.get_info().backend, best.get_info().name);
+            Ok(best.clone())
+        }));
+    }
+    config
+}
+
+#[cfg(not(windows))]
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    eframe::egui_wgpu::WgpuConfiguration::default()
 }
 
