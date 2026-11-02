@@ -46,6 +46,12 @@ pub struct OverlayMessage {
     pub content_speech: Option<String>,
     pub user_id: String,
     pub channel: String,
+    /// The URLs behind the `[Link de …]` tags in `content`, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
+    /// Images to show under the text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 impl OverlayMessage {
@@ -63,7 +69,15 @@ impl OverlayMessage {
             content_speech,
             user_id: user_id.into(),
             channel: channel.into(),
+            links: Vec::new(),
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_media(mut self, links: Vec<String>, images: Vec<String>) -> Self {
+        self.links = links;
+        self.images = images;
+        self
     }
 }
 

@@ -10,6 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use lawful_overlay_server::text::{humanize_links, link_urls};
 use lawful_overlay_server::ws::{self, Hub, OverlayMessage, Policy};
 use rand::seq::IndexedRandom;
 use rand::RngExt;
@@ -33,6 +34,8 @@ const FAKE_MESSAGES: &[&str] = &[
     "chat is cooked",
     "I can't believe that worked",
     "speedrun world record incoming?",
+    "mira esto https://www.youtube.com/watch?v=dQw4w9WgXcQ 😂🔥",
+    "familia 👨‍👩‍👧 y bandera 🇦🇷 ❤️",
 ];
 
 fn arg<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {
@@ -74,7 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
                     info!("Broadcasting → {user}: {text}");
-                    hub.broadcast(&OverlayMessage::new(user, text, None, id.to_string(), "general"));
+                    let msg = OverlayMessage::new(user, humanize_links(text, true), None, id.to_string(), "general");
+                    hub.broadcast(&msg.with_media(link_urls(text), Vec::new()));
                 }
                 tokio::time::sleep(Duration::from_secs_f64(interval.max(0.1))).await;
             }

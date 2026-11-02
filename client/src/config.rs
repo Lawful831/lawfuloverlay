@@ -23,6 +23,10 @@ pub struct Config {
     pub overlay_w: u32,
     pub overlay_h: u32,
     pub always_on_top: bool,
+    /// Images and gifs under the message.
+    pub show_images: bool,
+    /// Tallest an image is drawn, in px.
+    pub image_max_h: u32,
 
     // Fuente
     pub font_family: String,
@@ -63,6 +67,8 @@ impl Default for Config {
             overlay_w: 440,
             overlay_h: 110,
             always_on_top: true,
+            show_images: true,
+            image_max_h: 160,
             font_family: "Arial".into(),
             font_size: 14,
             font_bold: true,

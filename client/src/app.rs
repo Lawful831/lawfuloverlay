@@ -1,22 +1,25 @@
 //! The overlay window: title bar, outlined text on an optional badge, and the
 //! loops that feed it (messages, voice, colour detection).
 
+use std::ops::Range;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, RichText,
-    Sense, Stroke, StrokeKind, Vec2,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Galley,
+    Image, OpenUrl, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
-use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::load::{SizedTexture, TexturePoll};
+use eframe::egui::text::{CCursor, LayoutJob, TextFormat};
 
 use crate::color::{self, hex_or};
 use crate::config::Config;
 use crate::net::{self, Event};
+use crate::rich::Rich;
 use crate::sample;
 use crate::settings::{Outcome, Settings};
-use crate::text::display_safe;
+use crate::text::is_web_url;
 use crate::tts::Tts;
 use crate::updater;
 
@@ -40,6 +43,10 @@ const PT_TO_PX: f32 = 96.0 / 72.0;
 const MIN_W: f32 = 230.0;
 const MIN_CONTENT_H: f32 = 24.0;
 const COLOR_FADE: Duration = Duration::from_millis(450);
+/// Space between the text and the images, and between images.
+const IMAGE_GAP: f32 = 6.0;
+/// A custom emoji's size relative to the line height.
+const EMOJI_SCALE: f32 = 0.85;
 
 fn overlay_family() -> FontFamily {
     FontFamily::Name("overlay".into())
@@ -82,6 +89,11 @@ fn install_fonts(ctx: &egui::Context, family: &str, bold: bool) {
         }
     }
     let mut stack = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    // Segoe UI Emoji draws emoji in colour; it goes right behind the chosen font.
+    if let Some(bytes) = read_system_font("seguiemj.ttf") {
+        fonts.font_data.insert("emoji".into(), Arc::new(FontData::from_owned(bytes)));
+        stack.insert(0, "emoji".into());
+    }
     if let Some(bytes) = load_system_font(family, bold) {
         fonts.font_data.insert("overlay".into(), Arc::new(FontData::from_owned(bytes)));
         stack.insert(0, "overlay".into());
@@ -92,6 +104,43 @@ fn install_fonts(ctx: &egui::Context, family: &str, bold: bool) {
     ctx.set_fonts(fonts);
 }
 
+/// egui spots animated images by the extension at the end of the URI;
+/// Discord's media URLs carry a signed query after it.
+fn loadable_uri(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    let ext = [".gif", ".webp"].into_iter().find(|ext| path.ends_with(ext));
+    match ext {
+        Some(ext) if url.contains('?') => format!("{}&_=a{ext}", url.trim_end_matches('&')),
+        _ => url.to_string(),
+    }
+}
+
+/// The image at `url` once it has downloaded (the current frame, if animated).
+fn texture(ctx: &egui::Context, url: &str) -> Option<SizedTexture> {
+    match Image::new(loadable_uri(url)).load_for_size(ctx, Vec2::splat(1024.0)) {
+        Ok(TexturePoll::Ready { texture }) if texture.size.min_elem() > 0.0 => Some(texture),
+        _ => None,
+    }
+}
+
+/// Where chars `range` of `galley` sit: one rect per row they span.
+fn char_rects(galley: &Galley, range: Range<usize>) -> Vec<Rect> {
+    let mut rects: Vec<Rect> = Vec::new();
+    for i in range {
+        let a = galley.pos_from_cursor(CCursor::new(i));
+        let b = galley.pos_from_cursor(CCursor::new(i + 1));
+        if (a.min.y - b.min.y).abs() > 0.5 {
+            continue;
+        }
+        let r = Rect::from_min_max(a.min, Pos2::new(b.min.x, a.max.y));
+        match rects.last_mut() {
+            Some(last) if (last.min.y - r.min.y).abs() <= 0.5 => *last = last.union(r),
+            _ => rects.push(r),
+        }
+    }
+    rects
+}
+
 struct Fade {
     from: (Color32, Color32),
     to: (Color32, Color32),
@@ -100,7 +149,7 @@ struct Fade {
 
 pub struct OverlayApp {
     cfg: Config,
-    message: String,
+    message: Rich,
     text_color: Color32,
     outline_color: Color32,
     fade: Option<Fade>,
@@ -125,6 +174,7 @@ impl OverlayApp {
     pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config) -> Self {
         let ctx = cc.egui_ctx.clone();
         install_fonts(&ctx, &cfg.font_family, cfg.font_bold);
+        egui_extras::install_image_loaders(&ctx);
 
         let (tx, events) = mpsc::channel();
         net::spawn(cfg.ws_url.clone(), tx.clone(), ctx.clone());
@@ -138,7 +188,7 @@ impl OverlayApp {
             outline_color: hex_or(&cfg.outline_color, Color32::BLACK),
             font_key: (cfg.font_family.clone(), cfg.font_bold),
             next_detect: Instant::now() + Duration::from_millis(u64::from(cfg.detect_interval)),
-            message: display_safe("Esperando mensajes…"),
+            message: Rich::plain("Esperando mensajes…"),
             fade: None,
             last_bg: None,
             capture_excluded: false,
@@ -161,9 +211,9 @@ impl OverlayApp {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 // Status notices are shown but never spoken.
-                Event::Status(text) => self.message = display_safe(&text),
-                Event::Chat { user, content, speech } => {
-                    self.message = display_safe(&format!("*{user}*: {content}"));
+                Event::Status(text) => self.message = Rich::plain(&text),
+                Event::Chat { user, content, speech, links, images } => {
+                    self.message = Rich::chat(&user, &content, &links, images);
                     if self.cfg.tts_enabled {
                         self.tts.speak(&format!("*{user}*: {speech}"));
                     }
@@ -172,7 +222,7 @@ impl OverlayApp {
                     self.tts.mark_failed();
                     self.cfg.tts_enabled = false;
                     self.cfg.save();
-                    self.message = display_safe("TTS no disponible: sin Edge TTS ni voz local de Windows.");
+                    self.message = Rich::plain("TTS no disponible: sin Edge TTS ni voz local de Windows.");
                 }
             }
         }
@@ -277,26 +327,81 @@ impl OverlayApp {
 
     // ── Painting ─────────────────────────────────────────────────────────
 
-    /// Size the window to the text: wrapped at the configured width, nothing
-    /// more. The bar shows at start until the pointer has visited and left once;
-    /// afterwards hovering adds it above the text, so the text never moves.
+    /// The message laid out for painting. Links are underlined. For the
+    /// outline pass emoji are left out: they paint in their own colours, so
+    /// the offset copies would smear them.
+    fn layout(&self, painter: &egui::Painter, wrap: f32, color: Color32, outline: bool) -> Arc<Galley> {
+        let font = FontId::new(self.cfg.font_size as f32 * PT_TO_PX, overlay_family());
+        let chars: Vec<char> = self.message.text.chars().collect();
+        let mask = self.message.emoji_mask();
+        let kind = |i: usize| (self.message.links.iter().any(|(r, _)| r.contains(&i)), mask[i]);
+        let mut job = LayoutJob::default();
+        let mut start = 0;
+        while start < chars.len() {
+            let (link, emoji) = kind(start);
+            let mut end = start + 1;
+            while end < chars.len() && kind(end) == (link, emoji) {
+                end += 1;
+            }
+            let color = if outline && emoji { Color32::TRANSPARENT } else { color };
+            let underline = if link { Stroke::new((font.size / 14.0).max(1.0), color) } else { Stroke::NONE };
+            let run: String = chars[start..end].iter().collect();
+            job.append(&run, 0.0, TextFormat { font_id: font.clone(), color, underline, ..Default::default() });
+            start = end;
+        }
+        job.wrap.max_width = wrap;
+        job.halign = Align::Center;
+        painter.layout_job(job)
+    }
+
+    /// The downloaded images in one row, each at most `image_max_h` tall (never
+    /// enlarged), shrunk together to fit `max_w`. Rects start at the origin.
+    fn image_row(&self, ctx: &egui::Context, max_w: f32) -> Vec<(Rect, SizedTexture, &str)> {
+        if !self.cfg.show_images {
+            return Vec::new();
+        }
+        let max_h = self.cfg.image_max_h as f32;
+        let loaded: Vec<(SizedTexture, &str)> = self
+            .message
+            .images
+            .iter()
+            .filter_map(|url| texture(ctx, url).map(|t| (t, url.as_str())))
+            .collect();
+        let natural = |t: &SizedTexture| {
+            let h = t.size.y.min(max_h);
+            Vec2::new(h * t.size.x / t.size.y, h)
+        };
+        let gaps = IMAGE_GAP * loaded.len().saturating_sub(1) as f32;
+        let total_w: f32 = loaded.iter().map(|(t, _)| natural(t).x).sum();
+        let scale = ((max_w - gaps) / total_w).min(1.0);
+        let mut x = 0.0;
+        loaded
+            .into_iter()
+            .map(|(t, url)| {
+                let size = natural(&t) * scale;
+                let rect = Rect::from_min_size(Pos2::new(x, 0.0), size);
+                x += size.x + IMAGE_GAP;
+                (rect, t, url)
+            })
+            .collect()
+    }
+
+    /// Size the window to the text and images: wrapped at the configured
+    /// width, nothing more. The bar shows at start until the pointer has
+    /// visited and left once; afterwards hovering adds it above the text, so
+    /// the text never moves.
     fn fit_window(&mut self, ui: &egui::Ui, ctx: &egui::Context, hovered: bool) {
         let cfg = &self.cfg;
         let pad = cfg.badge_padding as f32;
         let ow = cfg.outline_width as f32;
         let max_w = cfg.overlay_w as f32;
-        let mut job = LayoutJob::single_section(
-            self.message.clone(),
-            TextFormat {
-                font_id: FontId::new(cfg.font_size as f32 * PT_TO_PX, overlay_family()),
-                ..Default::default()
-            },
-        );
-        job.wrap.max_width = (max_w - pad * 2.0 - ow * 2.0).max(10.0);
-        let text = ui.painter().layout_job(job).size();
+        let wrap = (max_w - pad * 2.0 - ow * 2.0).max(10.0);
+        let text = self.layout(ui.painter(), wrap, Color32::WHITE, false).size();
+        let row = row_size(&self.image_row(ctx, wrap));
+        let body = if row.y > 0.0 { Vec2::new(text.x.max(row.x), text.y + IMAGE_GAP + row.y) } else { text };
 
-        let content_w = (text.x + (pad + ow) * 2.0).clamp(MIN_W, max_w.max(MIN_W));
-        let content_h = (text.y + (pad + ow) * 2.0).max(MIN_CONTENT_H);
+        let content_w = (body.x + (pad + ow) * 2.0).clamp(MIN_W, max_w.max(MIN_W));
+        let content_h = (body.y + (pad + ow) * 2.0).max(MIN_CONTENT_H);
         let bar_h = if hovered { FRAME_H } else { 0.0 };
         let want = Vec2::new(content_w, content_h + bar_h);
 
@@ -358,7 +463,9 @@ impl OverlayApp {
         }
     }
 
-    fn paint_message(&self, ui: &egui::Ui, area: Rect) {
+    /// Paints the message; returns the clickable rects (links, images) and
+    /// where each leads.
+    fn paint_message(&self, ui: &egui::Ui, area: Rect) -> Vec<(Rect, String)> {
         let painter = ui.painter_at(area);
         let cfg = &self.cfg;
         let pad = cfg.badge_padding as f32;
@@ -377,21 +484,16 @@ impl OverlayApp {
             );
         }
 
-        let font = FontId::new(cfg.font_size as f32 * PT_TO_PX, overlay_family());
         let wrap = (area.width() - pad * 2.0).max(10.0);
-        let layout = |color: Color32| {
-            let mut job = LayoutJob::single_section(
-                self.message.clone(),
-                TextFormat { font_id: font.clone(), color, ..Default::default() },
-            );
-            job.wrap.max_width = wrap;
-            job.halign = Align::Center;
-            painter.layout_job(job)
-        };
-        let outline = layout(self.outline_color);
-        let fill = layout(self.text_color);
-        let center = area.center();
-        let origin = center - fill.rect.center().to_vec2();
+        let outline = self.layout(&painter, wrap, self.outline_color, true);
+        let fill = self.layout(&painter, wrap, self.text_color, false);
+        let images = self.image_row(ui.ctx(), wrap);
+        let row = row_size(&images);
+
+        // Text on top, images under it; the whole block centred.
+        let body_h = fill.rect.height() + if row.y > 0.0 { IMAGE_GAP + row.y } else { 0.0 };
+        let top = area.center().y - body_h / 2.0;
+        let origin = Pos2::new(area.center().x - fill.rect.center().x, top - fill.rect.min.y);
 
         let ow = cfg.outline_width as f32;
         if ow > 0.0 {
@@ -399,7 +501,34 @@ impl OverlayApp {
                 painter.galley(origin + Vec2::new(dx * ow, dy * ow), outline.clone(), self.outline_color);
             }
         }
-        painter.galley(origin, fill, self.text_color);
+        painter.galley(origin, fill.clone(), self.text_color);
+
+        for (index, url) in &self.message.emoji {
+            let Some(slot) = char_rects(&fill, *index..*index + 1).first().map(|r| r.translate(origin.to_vec2())) else {
+                continue;
+            };
+            if let Some(texture) = texture(ui.ctx(), url) {
+                let side = slot.height() * EMOJI_SCALE;
+                let fit = texture.size * (side / texture.size.max_elem());
+                Image::from_texture(texture).paint_at(ui, Rect::from_center_size(slot.center(), fit));
+            }
+        }
+
+        let mut targets = Vec::new();
+        for (range, url) in &self.message.links {
+            if is_web_url(url) {
+                for rect in char_rects(&fill, range.clone()) {
+                    targets.push((rect.translate(origin.to_vec2()), url.clone()));
+                }
+            }
+        }
+        let row_origin = Vec2::new(area.center().x - row.x / 2.0, top + fill.rect.height() + IMAGE_GAP);
+        for (rect, texture, url) in images {
+            let rect = rect.translate(row_origin);
+            Image::from_texture(texture).corner_radius(4).paint_at(ui, rect);
+            targets.push((rect, url.to_string()));
+        }
+        targets
     }
 }
 
@@ -444,7 +573,14 @@ impl eframe::App for OverlayApp {
         if hovered {
             self.paint_title_bar(ui, bar);
         }
-        self.paint_message(ui, content);
+        let targets = self.paint_message(ui, content);
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        if let Some((_, url)) = pointer.and_then(|p| targets.iter().find(|(rect, _)| rect.contains(p))) {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+            if ctx.input(|i| i.pointer.primary_clicked()) {
+                ctx.open_url(OpenUrl::new_tab(url));
+            }
+        }
 
         if let Some(mut dialog) = self.settings.take() {
             match dialog.show(&ctx) {
@@ -454,6 +590,11 @@ impl eframe::App for OverlayApp {
             }
         }
     }
+}
+
+/// Width and height of an image row.
+fn row_size<T>(row: &[(Rect, SizedTexture, T)]) -> Vec2 {
+    row.iter().fold(Vec2::ZERO, |size, (rect, _, _)| size.max(rect.max.to_vec2()))
 }
 
 /// Initial window options for the saved settings.

@@ -6,8 +6,11 @@ description = "LawfulOverlay: transparent always-on-top Discord chat overlay"
 
 [dependencies]
 dirs = "7.0.0"
-eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "wgpu"] }
+eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "links", "wgpu"] }
+egui_extras = { version = "0.37.0", default-features = false, features = ["http", "image", "gif", "webp"] }
+epaint = { version = "0.37.0", default-features = false, features = ["color_fonts"] }
 futures-util = "0.3.34"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 msedge-tts = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

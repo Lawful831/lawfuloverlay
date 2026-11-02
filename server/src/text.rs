@@ -91,10 +91,24 @@ pub fn humanize_links(text: &str, brackets: bool) -> String {
         .into_owned()
 }
 
+/// Every URL in the text, in order, as the overlay can open it (`www.` links
+/// get a scheme). The overlay pairs them with the `[Link de …]` tags.
+pub fn link_urls(text: &str) -> Vec<String> {
+    URL_RE
+        .find_iter(text)
+        .map(|m| match m.as_str() {
+            u if u.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("www.")) => format!("https://{u}"),
+            u => u.to_string(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Attachment {
     pub content_type: Option<String>,
     pub filename: String,
+    /// Discord's media proxy URL: the overlay never contacts third-party hosts.
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,6 +117,8 @@ pub struct Embed {
     pub kind: Option<String>,
     /// The embed carries an image or a thumbnail.
     pub has_image: bool,
+    /// Proxy URL of that image (or thumbnail).
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +176,34 @@ pub fn media_kind(attachments: &[Attachment], embeds: &[Embed], content: &str) -
     (!attachments.is_empty()).then_some(MediaKind::File)
 }
 
+/// Most images shown for one message.
+const MAX_IMAGES: usize = 4;
+
+/// Images the overlay shows under the text: image attachments, and the
+/// pictures of link previews. As with [`media_kind`], previews of ordinary
+/// links only count when the message has no text; direct image and gif links
+/// always do.
+pub fn image_urls(attachments: &[Attachment], embeds: &[Embed], content: &str) -> Vec<String> {
+    let attached = attachments
+        .iter()
+        .filter(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")) || is_gif(a))
+        .map(|a| a.url.clone());
+    let previews = embeds
+        .iter()
+        .filter(|e| {
+            content.is_empty()
+                || e.kind
+                    .as_deref()
+                    .is_some_and(|k| k.eq_ignore_ascii_case("image") || k.eq_ignore_ascii_case("gifv"))
+        })
+        .filter_map(|e| e.image_url.clone());
+    attached
+        .chain(previews)
+        .filter(|u| !u.is_empty())
+        .take(MAX_IMAGES)
+        .collect()
+}
+
 fn join_parts(parts: &[String]) -> String {
     parts
         .iter()
@@ -201,6 +245,7 @@ mod tests {
         Attachment {
             content_type: content_type.map(str::to_string),
             filename: filename.to_string(),
+            url: format!("https://media.example/{filename}"),
         }
     }
 
@@ -208,7 +253,30 @@ mod tests {
         Embed {
             kind: Some(kind.to_string()),
             has_image: true,
+            image_url: Some(format!("https://media.example/{kind}.png")),
         }
+    }
+
+    #[test]
+    fn link_list() {
+        assert_eq!(
+            link_urls("a www.twitch.tv/b y https://t.co/z."),
+            ["https://www.twitch.tv/b", "https://t.co/z"]
+        );
+        assert!(link_urls("sin enlaces").is_empty());
+    }
+
+    #[test]
+    fn images() {
+        let png = att(Some("image/png"), "a.png");
+        let pdf = att(None, "a.pdf");
+        assert_eq!(image_urls(&[png, pdf], &[], "x"), ["https://media.example/a.png"]);
+        // An ordinary link preview only when the message has no text.
+        assert!(image_urls(&[], &[embed("rich")], "https://youtu.be/x").is_empty());
+        assert_eq!(image_urls(&[], &[embed("rich")], ""), ["https://media.example/rich.png"]);
+        assert_eq!(image_urls(&[], &[embed("gifv")], "https://tenor.com/x"), ["https://media.example/gifv.png"]);
+        let many: Vec<_> = (0..9).map(|i| att(Some("image/png"), &format!("{i}.png"))).collect();
+        assert_eq!(image_urls(&many, &[], "").len(), MAX_IMAGES);
     }
 
     #[test]

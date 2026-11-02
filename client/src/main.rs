@@ -14,6 +14,7 @@ mod app;
 mod color;
 mod config;
 mod net;
+mod rich;
 mod sample;
 mod settings;
 mod text;

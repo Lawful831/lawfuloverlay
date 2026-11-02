@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::text::redact_url;
+use crate::text::{is_web_url, redact_url};
 
 /// What the background threads tell the UI.
 #[derive(Debug)]
@@ -21,6 +21,10 @@ pub enum Event {
         content: String,
         /// What the voice reads (falls back to `content`).
         speech: String,
+        /// The URLs behind the link tags in `content`, in order.
+        links: Vec<String>,
+        /// Images to show under the text (web URLs only).
+        images: Vec<String>,
     },
     /// Neither Edge TTS nor the local Windows voice worked.
     TtsFailed,
@@ -59,7 +63,15 @@ pub fn parse_frame(raw: &str) -> Option<Event> {
         s if s.is_empty() => content.clone(),
         s => s,
     };
-    Some(Event::Chat { user, content, speech })
+    let urls = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|u| u.as_str()).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let links = urls("links");
+    let images = urls("images").into_iter().filter(|u| is_web_url(u)).collect();
+    Some(Event::Chat { user, content, speech, links, images })
 }
 
 async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context) {
@@ -139,10 +151,21 @@ mod tests {
     #[test]
     fn parses_server_messages() {
         let raw = r#"{"type":"message","username":"ana","content":"hola [GIF]","content_speech":"hola gif","user_id":"1","channel":"c"}"#;
-        let Some(Event::Chat { user, content, speech }) = parse_frame(raw) else {
+        let Some(Event::Chat { user, content, speech, links, images }) = parse_frame(raw) else {
             panic!("expected a chat event");
         };
         assert_eq!((user.as_str(), content.as_str(), speech.as_str()), ("ana", "hola [GIF]", "hola gif"));
+        assert!(links.is_empty() && images.is_empty());
+    }
+
+    #[test]
+    fn parses_links_and_images() {
+        let raw = r#"{"type":"message","username":"a","content":"[Link de x]","links":["https://x.com/1"],"images":["https://m/a.png","file:///C:/a.png",3]}"#;
+        let Some(Event::Chat { links, images, .. }) = parse_frame(raw) else {
+            panic!();
+        };
+        assert_eq!(links, ["https://x.com/1"]);
+        assert_eq!(images, ["https://m/a.png"]);
     }
 
     #[test]

@@ -139,6 +139,12 @@ impl Settings {
         });
         hint(ui, "La ventana se ajusta sola al texto; el alto no se configura.");
         ui.checkbox(&mut self.draft.always_on_top, "Siempre encima");
+        ui.checkbox(&mut self.draft.show_images, "Mostrar imágenes y gifs");
+        ui.add_enabled_ui(self.draft.show_images, |ui| {
+            row(ui, "Alto máximo de imagen (px)", |ui| {
+                ui.add(DragValue::new(&mut self.draft.image_max_h).range(40..=600));
+            });
+        });
         ui.checkbox(&mut self.draft.auto_update, "Actualizar automáticamente al iniciar");
         ui.separator();
         header(ui, "Fuente");

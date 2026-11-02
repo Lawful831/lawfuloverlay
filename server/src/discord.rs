@@ -10,7 +10,7 @@ use serenity::all::{
 use serenity::async_trait;
 use tracing::{info, warn};
 
-use crate::text::{display_text, speech_text, Attachment, Embed};
+use crate::text::{display_text, image_urls, link_urls, speech_text, Attachment, Embed};
 use crate::ws::{Hub, OverlayMessage};
 
 pub struct Handler {
@@ -90,6 +90,7 @@ impl EventHandler for Handler {
             .map(|a| Attachment {
                 content_type: a.content_type.clone(),
                 filename: a.filename.clone(),
+                url: a.proxy_url.clone(),
             })
             .collect();
         let embeds: Vec<Embed> = msg
@@ -98,12 +99,18 @@ impl EventHandler for Handler {
             .map(|e| Embed {
                 kind: e.kind.clone(),
                 has_image: e.image.is_some() || e.thumbnail.is_some(),
+                image_url: e
+                    .image
+                    .as_ref()
+                    .and_then(|i| i.proxy_url.clone())
+                    .or_else(|| e.thumbnail.as_ref().and_then(|t| t.proxy_url.clone())),
             })
             .collect();
 
         let speech = speech_text(&attachments, &embeds, content);
         let display = display_text(&attachments, &embeds, content);
         let shown = if display.is_empty() { speech.clone() } else { display };
+        let images = image_urls(&attachments, &embeds, content);
 
         info!(
             "Relaying message from {username}: {}",
@@ -116,7 +123,8 @@ impl EventHandler for Handler {
             Some(speech),
             msg.author.id.to_string(),
             channel_name(&ctx.cache, msg.guild_id, msg.channel_id),
-        ));
+        )
+        .with_media(link_urls(content), images));
     }
 }
 

@@ -126,6 +126,7 @@ cargo test                 # unit tests + socket policy tests
 | **Resource limits** | CPU cap 0.5 core, memory cap 256 MB |
 | **No privilege escalation** | `no-new-privileges:true` security option |
 | **Secrets not in VCS** | `.env` / `server/.env` are in `.gitignore` |
+| **Media through Discord** | Images are fetched through Discord's media proxy, never from the linked sites; the overlay only opens `http(s)` links, and only when clicked |
 | **Rate limiting** | The bot does not call any Discord API endpoints beyond reading messages — no spam risk |
 
 ---
