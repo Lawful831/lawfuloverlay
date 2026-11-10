@@ -28,3 +28,6 @@ target/
 # Leftover local Python artifacts
 venv/
 __pycache__/
+
+# ds-delegate logs
+.ds/

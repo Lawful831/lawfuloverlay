@@ -19,7 +19,7 @@ use crate::net::{self, Event};
 use crate::rich::Rich;
 use crate::sample;
 use crate::settings::{Outcome, Settings};
-use crate::text::is_web_url;
+use crate::text::{is_web_url, parse_markup};
 use crate::tts::Tts;
 use crate::updater;
 
@@ -181,7 +181,7 @@ impl OverlayApp {
         if cfg.auto_update {
             updater::spawn(tx.clone(), ctx.clone());
         }
-        let tts = Tts::new(&cfg.tts_voice, tx, ctx);
+        let tts = Tts::new(&cfg.tts_voice, &cfg.fish_voice, tx, ctx);
 
         Self {
             text_color: hex_or(&cfg.text_color, Color32::WHITE),
@@ -213,9 +213,10 @@ impl OverlayApp {
                 // Status notices are shown but never spoken.
                 Event::Status(text) => self.message = Rich::plain(&text),
                 Event::Chat { user, content, speech, links, images } => {
-                    self.message = Rich::chat(&user, &content, &links, images);
+                    // Voice markup (`//voice id//`, `[cues]`) is never drawn.
+                    self.message = Rich::chat(&user, &parse_markup(&content).shown, &links, images);
                     if self.cfg.tts_enabled {
-                        self.tts.speak(&format!("*{user}*: {speech}"));
+                        self.tts.speak_chat(&speech);
                     }
                 }
                 Event::TtsFailed => {
@@ -300,9 +301,10 @@ impl OverlayApp {
     fn apply_settings(&mut self, ctx: &egui::Context, mut new: Config) {
         // The voice toggle lives on the title bar, not in the dialog.
         new.tts_enabled = self.cfg.tts_enabled;
-        if new.tts_voice != self.cfg.tts_voice {
+        new.fish_voice = new.fish_voice.trim().to_string();
+        if new.tts_voice != self.cfg.tts_voice || new.fish_voice != self.cfg.fish_voice {
             self.tts.reset_queue();
-            self.tts.set_voice(&new.tts_voice);
+            self.tts.set_voices(&new.tts_voice, &new.fish_voice);
         }
         self.cfg = new;
         self.cfg.save();

@@ -54,6 +54,8 @@ pub struct Config {
     // Voz
     pub tts_enabled: bool,
     pub tts_voice: String,
+    /// Fish Audio voice id used when a message names none; empty = not used.
+    pub fish_voice: String,
 
     // Actualizaciones
     pub auto_update: bool,
@@ -85,9 +87,42 @@ impl Default for Config {
             detect_threshold: 25,
             tts_enabled: false,
             tts_voice: "en-US-AriaNeural".into(),
+            fish_voice: String::new(),
             auto_update: true,
         }
     }
+}
+
+// A private build can bake in a Fish Audio API key:
+// LAWFUL_FISH_API_KEY=... cargo build. It never lives in the repository.
+const FISH_KEY_RAW: &str = match option_env!("LAWFUL_FISH_API_KEY") {
+    Some(key) => key,
+    None => "",
+};
+
+const fn fish_key_mask(i: usize) -> u8 {
+    0xA7 ^ (i as u8).wrapping_mul(31)
+}
+
+/// The key, scrambled at compile time so it is not a readable string in the
+/// exe. This only stops casual scans: anyone determined can still recover it.
+const FISH_KEY: [u8; FISH_KEY_RAW.len()] = {
+    let raw = FISH_KEY_RAW.as_bytes();
+    let mut out = [0u8; FISH_KEY_RAW.len()];
+    let mut i = 0;
+    while i < raw.len() {
+        out[i] = raw[i] ^ fish_key_mask(i);
+        i += 1;
+    }
+    out
+};
+
+/// The Fish Audio API key baked into this build, if any. Never log it.
+pub fn fish_api_key() -> Option<String> {
+    let scrambled = std::hint::black_box(&FISH_KEY);
+    let bytes: Vec<u8> = scrambled.iter().enumerate().map(|(i, b)| b ^ fish_key_mask(i)).collect();
+    let key = String::from_utf8(bytes).ok()?.trim().to_string();
+    (!key.is_empty()).then_some(key)
 }
 
 /// `LAWFUL_OVERLAY_CONFIG` overrides the location (handy for testing).

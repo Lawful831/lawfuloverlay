@@ -2,12 +2,18 @@ name: release
 
 # Push a tag like v0.3.0 (matching client/Cargo.toml's version) to publish a
 # release. Installed clients pick it up through their auto-updater.
+#
+# Code signing runs when the repository variable AZURE_SIGNING_ACCOUNT is set
+# (see "Windows trust" in the README). Without it the exe is published
+# unsigned, exactly as before.
 on:
   push:
     tags: ["v*.*.*"]
 
 permissions:
   contents: write
+  id-token: write # build provenance attestation
+  attestations: write
 
 jobs:
   windows:
@@ -22,7 +28,42 @@ jobs:
       - run: cargo build --release --locked -p lawful-overlay
       - name: Stage asset
         shell: bash
-        run: cp target/release/lawful-overlay.exe LawfulOverlay.exe
+        run: mkdir out && cp target/release/lawful-overlay.exe out/LawfulOverlay.exe
+
+      - name: Sign (Azure Artifact Signing)
+        if: ${{ vars.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\out
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Signature is valid
+        if: ${{ vars.AZURE_SIGNING_ACCOUNT != '' }}
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature out\LawfulOverlay.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+          if ($sig.Status -ne 'Valid') { throw "LawfulOverlay.exe is not validly signed: $($sig.Status)" }
+          if (-not $sig.TimeStamperCertificate) { throw "LawfulOverlay.exe has no timestamp" }
+
+      - name: Checksum
+        shell: bash
+        run: cd out && sha256sum LawfulOverlay.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # Proves this exact file was built by this workflow from this commit:
+      #   gh attestation verify LawfulOverlay.exe --repo Lawful831/lawfuloverlay
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: out/LawfulOverlay.exe
       - uses: softprops/action-gh-release@v2
         with:
-          files: LawfulOverlay.exe
+          files: |
+            out/LawfulOverlay.exe
+            out/SHA256SUMS.txt

@@ -60,6 +60,64 @@ You can change the URL via the ⚙ settings button in the overlay.
 The client updates itself: on start (and every 6 h) it checks the latest GitHub release and, if newer, downloads `LawfulOverlay.exe`, swaps it in and restarts. Turn it off in ⚙ → *Actualizar automáticamente*, or set `LAWFUL_OVERLAY_NO_UPDATE=1`. To ship an update, bump `version` in `client/Cargo.toml` and push a matching tag (`git tag v0.3.0 && git push origin v0.3.0`); `.github/workflows/release.yml` builds and attaches the exe.
 Settings are stored in `~/.discord_chat_overlay/client_settings.json`.
 
+### Voice (text to speech)
+
+The 🔊 button reads messages aloud: only the message, not the name of who wrote it (the overlay still shows the name). Voices are tried in this order:
+
+1. **Fish Audio**, only in a build that has an API key baked in, and only when a voice id is known: the one in ⚙ → *Voz* → *Voz Fish Audio (ID)*, or the one the message names. The paid model (`s2.1-pro`) is tried first; if it is refused (no credit, rate limit, overload) the free one (`s2.1-pro-free`) is tried.
+2. **Edge TTS** (the voice picked in ⚙ → *Voz*).
+3. The voice built into Windows.
+
+Markup in a chat message:
+
+| Written in Discord | Effect |
+|---|---|
+| `//ca3007f96ae7499ab87d27ea3599956a// hola` | That message is spoken with that Fish Audio voice (the 32 hex characters at the end of a `fish.audio/m/…` URL). The template is not shown. |
+| `[happy] hola [laughing]` | Text in square brackets is never shown. Fish Audio gets it as an emotion or tone cue; the other voices skip it. The server's own tags (`[Link de …]`, `[GIF]`, `[Imagen]`, `[Archivo]`) still show. |
+
+**Fish Audio key.** The key is read at compile time from the `LAWFUL_FISH_API_KEY` environment variable and is never stored in this repository. Without it the build simply has no Fish Audio.
+
+```bash
+# Git Bash
+LAWFUL_FISH_API_KEY=your-key cargo build --release --locked -p lawful-overlay
+```
+
+`scripts\build.bat` also reads it from a `fish.env` file in the repository root (gitignored), containing one line: `LAWFUL_FISH_API_KEY=your-key`.
+
+> A key baked into an exe can be extracted by anyone who has the exe. Keep keyed builds private: the GitHub release workflow builds without a key on purpose. A private build also replaces itself with the public (keyless) release when one is newer, so turn off ⚙ → *Actualizar automáticamente* or set `LAWFUL_OVERLAY_NO_UPDATE=1`.
+
+### Windows trust
+
+What the client does so Windows and antivirus tools can tell what it is:
+
+- **Identity.** The exe carries version info (product, publisher, version, copyright) and an application manifest that declares it never asks for elevation (`asInvoker`). See `client/build.rs`.
+- **No hidden child processes.** The fallback Windows voice runs in-process through SAPI. The client starts no PowerShell or `cmd`. The only process it ever starts is its own new version after an update.
+- **Checked updates.** An update is installed only if it comes from this repository's releases over HTTPS, has the size GitHub reports, and matches the SHA-256 digest GitHub publishes. Once a build is code-signed, it also refuses any update that is not validly signed by the same publisher.
+- **Verifiable releases.** Each release has `SHA256SUMS.txt` and a build provenance attestation. To prove an exe was built by this repository's workflow: `gh attestation verify LawfulOverlay.exe --repo Lawful831/lawfuloverlay`.
+
+**Code signing** is the one step that removes the SmartScreen "unknown publisher" warning, and it needs a certificate that only the maintainer can obtain. The release workflow already signs when these are set in the GitHub repository (Settings → Secrets and variables → Actions):
+
+| Kind | Name | Value |
+|---|---|---|
+| Variable | `AZURE_SIGNING_ACCOUNT` | Artifact Signing account name |
+| Variable | `AZURE_SIGNING_PROFILE` | Certificate profile name |
+| Variable | `AZURE_SIGNING_ENDPOINT` | Region endpoint, e.g. `https://eus.codesigning.azure.net/` |
+| Secret | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | App registration with the *Artifact Signing Certificate Profile Signer* role |
+
+This uses [Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/) (formerly Trusted Signing), a paid Microsoft service with identity validation; check that your country is eligible. A free alternative for open-source projects is [SignPath Foundation](https://signpath.org/); it needs a different signing step in the workflow. Until one is set up, releases are unsigned and new versions can still show a SmartScreen warning.
+
+If Defender flags a release by mistake, report it at <https://www.microsoft.com/wdsi/filesubmission> (choose *Software developer*). Microsoft then corrects the detection for every user, which an exclusion on one machine does not do.
+
+**Windows Defender still flags or removes the exe?** As a last resort on your own machine, `scripts/defender_exclusion.ps1` (kept in the repo only, not shipped with the exe) excludes the exe, the updater's `LawfulOverlay.new` / `LawfulOverlay.old` files and the settings folder. Every path is worked out on the machine that runs it, so it works for any user and install folder. It asks for administrator rights, skips exclusions that already exist, and `-Remove` undoes them. Put it next to `LawfulOverlay.exe` (or pass `-ExePath`) and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\defender_exclusion.ps1
+powershell -ExecutionPolicy Bypass -File .\defender_exclusion.ps1 -ExePath "D:\Apps\LawfulOverlay.exe"
+powershell -ExecutionPolicy Bypass -File .\defender_exclusion.ps1 -Remove
+```
+
+Run it again if you move the exe.
+
 The socket requires a shared token. Put it in the URL itself:
 
 ```

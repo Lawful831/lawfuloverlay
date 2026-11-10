@@ -21,8 +21,19 @@ mod text;
 mod tts;
 mod updater;
 
+/// Pick the TLS crypto backend for the whole process. Without this, rustls
+/// panics on the first `wss://` or Edge voice connection, because both of its
+/// backends are compiled in and it will not choose one by itself.
+pub(crate) fn install_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 fn main() -> eframe::Result {
     eprintln!("LawfulOverlay — Cliente");
+    install_tls_provider();
     updater::cleanup();
     let cfg = config::Config::load();
     eprintln!("Servidor: {}", text::redact_url(&cfg.ws_url));

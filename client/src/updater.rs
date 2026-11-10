@@ -131,13 +131,106 @@ fn download(agent: &ureq::Agent, asset: &Asset, dest: &Path) -> Result<(), Strin
     if total != asset.size {
         return Err(format!("descarga incompleta ({total} de {} bytes)", asset.size));
     }
-    if let Some(expected) = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) {
-        let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        if !actual.eq_ignore_ascii_case(expected) {
-            return Err("el hash SHA-256 no coincide".into());
-        }
+    // No digest, no install: an update that cannot be checked is not trusted.
+    let expected = asset
+        .digest
+        .as_deref()
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .ok_or("la release no publica el hash SHA-256")?;
+    let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err("el hash SHA-256 no coincide".into());
     }
     Ok(())
+}
+
+/// Once this build is code-signed, only an update signed by the same
+/// publisher may replace it. Unsigned builds skip the check, so the first
+/// signed release still reaches clients installed before signing existed.
+fn check_publisher(exe: &Path, new: &Path) -> Result<(), String> {
+    let Some(current) = authenticode::publisher(exe) else {
+        return Ok(());
+    };
+    match authenticode::publisher(new) {
+        Some(publisher) if publisher == current => Ok(()),
+        Some(publisher) => Err(format!("la actualización está firmada por otro editor ({publisher})")),
+        None => Err("la actualización no tiene una firma digital válida".into()),
+    }
+}
+
+#[cfg(windows)]
+mod authenticode {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Security::Cryptography::{CertNameToStrW, CERT_X500_NAME_STR, X509_ASN_ENCODING};
+    use windows_sys::Win32::Security::WinTrust::{
+        WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData,
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    };
+
+    /// The certificate subject of the file's embedded Authenticode signature,
+    /// when Windows accepts that signature as valid and trusted. `None` for
+    /// unsigned files and for signatures Windows rejects.
+    pub fn publisher(path: &Path) -> Option<String> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both structs are plain data that outlive the two calls;
+        // `wide` is NUL-terminated; the state handle opened by VERIFY is
+        // always released by the CLOSE call, and the pointers read from it
+        // are only used before that.
+        unsafe {
+            let mut file: WINTRUST_FILE_INFO = std::mem::zeroed();
+            file.cbStruct = std::mem::size_of::<WINTRUST_FILE_INFO>() as u32;
+            file.pcwszFilePath = wide.as_ptr();
+
+            let mut data: WINTRUST_DATA = std::mem::zeroed();
+            data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
+            data.dwUIChoice = WTD_UI_NONE;
+            data.fdwRevocationChecks = WTD_REVOKE_NONE;
+            data.dwUnionChoice = WTD_CHOICE_FILE;
+            data.Anonymous.pFile = &mut file;
+            data.dwStateAction = WTD_STATEACTION_VERIFY;
+
+            let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+            let data_ptr = std::ptr::addr_of_mut!(data);
+            let status = WinVerifyTrust(std::ptr::null_mut(), &mut action, data_ptr.cast::<c_void>());
+            let subject = if status == 0 { signer_subject((*data_ptr).hWVTStateData) } else { None };
+
+            (*data_ptr).dwStateAction = WTD_STATEACTION_CLOSE;
+            WinVerifyTrust(std::ptr::null_mut(), &mut action, data_ptr.cast::<c_void>());
+            subject
+        }
+    }
+
+    /// SAFETY: `state` must be the open state handle of a successful verification.
+    unsafe fn signer_subject(state: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+        let prov = WTHelperProvDataFromStateData(state);
+        if prov.is_null() {
+            return None;
+        }
+        let signer = WTHelperGetProvSignerFromChain(prov, 0, 0, 0);
+        if signer.is_null() {
+            return None;
+        }
+        let cert = WTHelperGetProvCertFromChain(signer, 0);
+        if cert.is_null() || (*cert).pCert.is_null() || (*(*cert).pCert).pCertInfo.is_null() {
+            return None;
+        }
+        let name = &(*(*(*cert).pCert).pCertInfo).Subject;
+        let mut buf = [0u16; 1024];
+        let len = CertNameToStrW(X509_ASN_ENCODING, name, CERT_X500_NAME_STR, buf.as_mut_ptr(), buf.len() as u32);
+        // `len` counts the terminating NUL.
+        (len > 1).then(|| String::from_utf16_lossy(&buf[..len as usize - 1]))
+    }
+}
+
+#[cfg(not(windows))]
+mod authenticode {
+    pub fn publisher(_path: &std::path::Path) -> Option<String> {
+        None
+    }
 }
 
 /// Swap the downloaded file in for the running exe.
@@ -165,6 +258,10 @@ fn update_once(tx: &Sender<Event>, ctx: &egui::Context, exe: &Path) -> Result<()
     let new = exe.with_extension("new");
     say(format!("Descargando actualización {tag}…"));
     if let Err(e) = download(&agent, &asset, &new) {
+        let _ = std::fs::remove_file(&new);
+        return Err(e);
+    }
+    if let Err(e) = check_publisher(exe, &new) {
         let _ = std::fs::remove_file(&new);
         return Err(e);
     }
@@ -223,6 +320,38 @@ mod tests {
     #[test]
     fn orders_numerically() {
         assert!(parse_version("v0.10.0") > parse_version("v0.9.9"));
+    }
+
+    /// The test binary is unsigned; a copy of a Microsoft-signed exe is not.
+    /// The copy is named `*.new`, like the file the updater checks.
+    #[cfg(windows)]
+    #[test]
+    fn reads_authenticode_publisher() {
+        let me = std::env::current_exe().unwrap();
+        assert_eq!(authenticode::publisher(&me), None);
+        assert!(check_publisher(&me, &me).is_ok(), "unsigned builds skip the check");
+
+        let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap();
+        let candidates = [
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            windir.join(r"System32\OneDriveSetup.exe"),
+            windir.join(r"SysWOW64\OneDriveSetup.exe"),
+        ];
+        let Some(signed) = candidates.iter().find(|p| authenticode::publisher(p).is_some()) else {
+            eprintln!("no embedded-signed exe found on this machine; skipping");
+            return;
+        };
+        let copy = std::env::temp_dir().join(format!("lawful_sig_test_{}.new", std::process::id()));
+        std::fs::copy(signed, &copy).unwrap();
+        let publisher = authenticode::publisher(&copy);
+        let same = check_publisher(signed, &copy);
+        let unsigned_update = check_publisher(signed, &me);
+        let _ = std::fs::remove_file(&copy);
+
+        let publisher = publisher.expect("signature survives the .new name");
+        assert!(publisher.contains("Microsoft"), "{publisher}");
+        assert!(same.is_ok(), "{same:?}");
+        assert!(unsigned_update.is_err(), "a signed build must refuse an unsigned update");
     }
 
     #[test]
