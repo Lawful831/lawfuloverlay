@@ -117,12 +117,44 @@ const FISH_KEY: [u8; FISH_KEY_RAW.len()] = {
     out
 };
 
-/// The Fish Audio API key baked into this build, if any. Never log it.
-pub fn fish_api_key() -> Option<String> {
+fn baked_fish_key() -> Option<String> {
     let scrambled = std::hint::black_box(&FISH_KEY);
     let bytes: Vec<u8> = scrambled.iter().enumerate().map(|(i, b)| b ^ fish_key_mask(i)).collect();
     let key = String::from_utf8(bytes).ok()?.trim().to_string();
     (!key.is_empty()).then_some(key)
+}
+
+/// Where a keyed build keeps its key, next to the settings. The auto-updater
+/// swaps in the public exe, which has no key baked in: it finds the key here.
+fn fish_key_path() -> PathBuf {
+    config_path().with_file_name("fish_key.txt")
+}
+
+/// A keyed build saves its key so that an update to a keyless build keeps
+/// Fish Audio working. Call once at start-up. A keyless build changes nothing.
+pub fn persist_fish_key() {
+    let Some(key) = baked_fish_key() else { return };
+    let path = fish_key_path();
+    if std::fs::read_to_string(&path).is_ok_and(|saved| saved.trim() == key) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, key) {
+        eprintln!("[cfg] No se pudo guardar la clave de Fish Audio: {e}");
+    }
+}
+
+/// The Fish Audio API key: the one baked into this build, else the one a
+/// keyed build saved earlier. Never log it.
+pub fn fish_api_key() -> Option<String> {
+    static KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        baked_fish_key().or_else(|| {
+            let saved = std::fs::read_to_string(fish_key_path()).ok()?;
+            let saved = saved.trim();
+            (!saved.is_empty()).then(|| saved.to_string())
+        })
+    })
+    .clone()
 }
 
 /// `LAWFUL_OVERLAY_CONFIG` overrides the location (handy for testing).

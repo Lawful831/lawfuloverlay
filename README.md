@@ -84,6 +84,8 @@ LAWFUL_FISH_API_KEY=your-key cargo build --release --locked -p lawful-overlay
 
 `scripts\build.bat` also reads it from a `fish.env` file in the repository root (gitignored), containing one line: `LAWFUL_FISH_API_KEY=your-key`.
 
+A keyed build saves its key to `~/.discord_chat_overlay/fish_key.txt` the first time it runs. When the auto-updater swaps in the public (keyless) release, that exe reads the key from this file, so Fish Audio keeps working after an update. Delete the file to remove the key from the machine.
+
 > A key baked into an exe can be extracted by anyone who has the exe. Keep keyed builds private: the GitHub release workflow builds without a key on purpose. A private build also replaces itself with the public (keyless) release when one is newer, so turn off ⚙ → *Actualizar automáticamente* or set `LAWFUL_OVERLAY_NO_UPDATE=1`.
 
 ### Windows trust
