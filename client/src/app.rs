@@ -177,11 +177,11 @@ impl OverlayApp {
         egui_extras::install_image_loaders(&ctx);
 
         let (tx, events) = mpsc::channel();
-        net::spawn(cfg.ws_url.clone(), tx.clone(), ctx.clone());
+        let tts_link = net::spawn(cfg.ws_url.clone(), tx.clone(), ctx.clone());
         if cfg.auto_update {
             updater::spawn(tx.clone(), ctx.clone());
         }
-        let tts = Tts::new(&cfg.tts_voice, &cfg.fish_voice, tx, ctx);
+        let tts = Tts::new(&cfg.tts_voice, &cfg.fish_voice, tx, ctx, tts_link);
 
         Self {
             text_color: hex_or(&cfg.text_color, Color32::WHITE),

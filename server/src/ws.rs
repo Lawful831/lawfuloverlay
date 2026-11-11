@@ -11,12 +11,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{interval, timeout, Instant, MissedTickBehavior};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -26,12 +28,75 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
+use crate::fish::{self, Fish};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(20);
 const PONG_WITHIN: Duration = Duration::from_secs(20);
 /// Messages a slow client may fall behind before it starts skipping.
 const BACKLOG: usize = 64;
+/// Per connection: `tts` requests allowed in each window.
+const TTS_PER_WINDOW: u32 = 10;
+const TTS_WINDOW: Duration = Duration::from_secs(60);
+/// Longest voice id accepted, in bytes.
+const MAX_VOICE_BYTES: usize = 100;
+
+/// A client's request for speech: `{"type":"tts","id":1,"text":"...","voice":"..."}`.
+#[derive(Deserialize)]
+struct TtsRequest {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    voice: String,
+}
+
+/// Limits on one connection's `tts` requests: one at a time, and a few per window.
+#[derive(Default)]
+struct TtsGate {
+    busy: bool,
+    window: Option<Instant>,
+    count: u32,
+}
+
+impl TtsGate {
+    fn admit(&mut self) -> Result<(), &'static str> {
+        if self.busy {
+            return Err("busy");
+        }
+        let now = Instant::now();
+        if self.window.is_none_or(|w| now.duration_since(w) >= TTS_WINDOW) {
+            self.window = Some(now);
+            self.count = 0;
+        }
+        if self.count >= TTS_PER_WINDOW {
+            return Err("rate limit");
+        }
+        self.count += 1;
+        Ok(())
+    }
+}
+
+/// Checks a `tts` request. Refusals are answered at once and cost nothing;
+/// an accepted request returns the Fish Audio handle to synthesise with.
+fn admit_tts(req: &TtsRequest, fish: Option<&Arc<Fish>>, gate: &mut TtsGate) -> Result<Arc<Fish>, &'static str> {
+    let fish = fish.ok_or("tts unavailable")?;
+    let chars = req.text.chars().count();
+    if chars == 0 {
+        return Err("empty text");
+    }
+    if chars > fish::MAX_CHARS {
+        return Err("text too long");
+    }
+    if req.voice.len() > MAX_VOICE_BYTES {
+        return Err("voice id too long");
+    }
+    gate.admit()?;
+    Ok(Arc::clone(fish))
+}
 
 /// What goes over the wire to the overlay.
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +156,8 @@ pub struct Policy {
     pub max_per_ip: usize,
     pub max_frame_bytes: usize,
     pub max_frames_per_s: u32,
+    /// Fish Audio for `tts` requests. `None` when no key is configured.
+    pub tts: Option<Arc<Fish>>,
 }
 
 impl Policy {
@@ -102,6 +169,7 @@ impl Policy {
             max_per_ip: cfg.max_per_ip,
             max_frame_bytes: cfg.max_frame_bytes,
             max_frames_per_s: cfg.max_frames_per_s,
+            tts: Fish::new(&cfg.fish_api_key).map(Arc::new),
         }
     }
 
@@ -114,6 +182,7 @@ impl Policy {
             max_per_ip: 1000,
             max_frame_bytes: 64 * 1024,
             max_frames_per_s: u32::MAX,
+            tts: None,
         }
     }
 
@@ -274,6 +343,10 @@ pub async fn serve(
     }
 }
 
+fn tts_error(id: u64, error: &str) -> Message {
+    Message::text(json!({ "type": "tts_error", "id": id, "error": error }).to_string())
+}
+
 fn close_frame(code: CloseCode, reason: &'static str) -> Message {
     Message::Close(Some(CloseFrame {
         code,
@@ -342,13 +415,16 @@ where
     let mut ping_sent: Option<Instant> = None;
     let mut frames: u32 = 0;
     let mut window = Instant::now();
+    // Fish Audio answers come back from blocking threads through this channel.
+    let (tts_done, mut tts_replies) = mpsc::unbounded_channel::<String>();
+    let mut tts = TtsGate::default();
 
     loop {
         tokio::select! {
             frame = stream.next() => match frame {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 Some(Ok(Message::Pong(_))) => ping_sent = None,
-                Some(Ok(_)) => {
+                Some(Ok(msg)) => {
                     if window.elapsed() >= Duration::from_secs(1) {
                         frames = 0;
                         window = Instant::now();
@@ -359,8 +435,43 @@ where
                         let _ = sink.send(close_frame(CloseCode::Policy, "rate limit")).await;
                         break;
                     }
+                    // Everything else a client sends is discarded, except `tts` requests.
+                    let Message::Text(raw) = msg else { continue };
+                    let Ok(req) = serde_json::from_str::<TtsRequest>(&raw) else { continue };
+                    if req.kind != "tts" {
+                        continue;
+                    }
+                    match admit_tts(&req, policy.tts.as_ref(), &mut tts) {
+                        Err(error) => {
+                            if sink.send(tts_error(req.id, error)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(fish) => {
+                            tts.busy = true;
+                            let done = tts_done.clone();
+                            let (id, text, voice) = (req.id, req.text, req.voice);
+                            tokio::task::spawn_blocking(move || {
+                                let reply = match fish.synthesize(&text, &voice) {
+                                    Ok(audio) => json!({
+                                        "type": "tts_audio",
+                                        "id": id,
+                                        "audio": base64::engine::general_purpose::STANDARD.encode(audio),
+                                    }),
+                                    Err(error) => json!({ "type": "tts_error", "id": id, "error": error }),
+                                };
+                                let _ = done.send(reply.to_string());
+                            });
+                        }
+                    }
                 }
             },
+            Some(reply) = tts_replies.recv() => {
+                tts.busy = false;
+                if sink.send(Message::text(reply)).await.is_err() {
+                    break;
+                }
+            }
             msg = rx.recv() => match msg {
                 Ok(json) => {
                     if sink.send(Message::text(json.to_string())).await.is_err() {

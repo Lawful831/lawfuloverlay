@@ -1,10 +1,13 @@
 //! WebSocket listener (background thread). Reconnects with exponential backoff.
 
-use std::sync::mpsc::Sender;
+use std::collections::HashMap;
+use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
+use base64::Engine;
 use eframe::egui;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -34,7 +37,46 @@ pub enum Event {
 const IDLE_LIMIT: Duration = Duration::from_secs(70);
 const CONNECT_LIMIT: Duration = Duration::from_secs(15);
 
-pub fn spawn(url: String, tx: Sender<Event>, ctx: egui::Context) {
+/// How long the speech thread waits for the server to answer a `tts` request
+/// (the server gives Fish Audio 60 s).
+const TTS_WAIT: Duration = Duration::from_secs(90);
+
+type TtsResult = Result<Vec<u8>, String>;
+
+/// A request for Fish Audio speech, answered on `reply` by the socket thread.
+struct TtsRequest {
+    text: String,
+    voice: String,
+    reply: Sender<TtsResult>,
+}
+
+/// How the speech thread asks the server for Fish Audio speech. The API key
+/// lives on the server only; this is just a request over the open socket.
+#[derive(Clone)]
+pub struct TtsLink {
+    tx: UnboundedSender<TtsRequest>,
+}
+
+impl TtsLink {
+    /// mp3 audio, or why there is none (no key on the server, a limit, a
+    /// refusal, no connection). Blocks until the server answers.
+    pub fn synthesize(&self, text: &str, voice: &str) -> TtsResult {
+        let (reply, answer) = mpsc::channel();
+        let request = TtsRequest { text: text.into(), voice: voice.into(), reply };
+        self.tx.send(request).map_err(|_| "sin conexión con el servidor".to_string())?;
+        answer.recv_timeout(TTS_WAIT).unwrap_or_else(|_| Err("el servidor no respondió".into()))
+    }
+
+    /// A link to nowhere: every request fails.
+    #[cfg(test)]
+    pub fn offline() -> Self {
+        Self { tx: unbounded_channel().0 }
+    }
+}
+
+/// Start the socket thread. The returned link carries speech requests to it.
+pub fn spawn(url: String, tx: Sender<Event>, ctx: egui::Context) -> TtsLink {
+    let (requests, tts_rx) = unbounded_channel();
     std::thread::Builder::new()
         .name("ws-listener".into())
         .spawn(move || {
@@ -42,9 +84,30 @@ pub fn spawn(url: String, tx: Sender<Event>, ctx: egui::Context) {
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(listen(url, tx, ctx));
+            rt.block_on(listen(url, tx, ctx, tts_rx));
         })
         .expect("spawn ws thread");
+    TtsLink { tx: requests }
+}
+
+/// A `tts_audio` / `tts_error` reply: the request id and its outcome.
+fn parse_tts_reply(raw: &str) -> Option<(u64, TtsResult)> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let id = v.get("id")?.as_u64()?;
+    match v.get("type")?.as_str()? {
+        "tts_audio" => {
+            let audio = v.get("audio")?.as_str()?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(audio)
+                .map_err(|_| "audio no válido".to_string());
+            Some((id, decoded))
+        }
+        "tts_error" => {
+            let error = v.get("error").and_then(|e| e.as_str()).unwrap_or("error");
+            Some((id, Err(error.to_string())))
+        }
+        _ => None,
+    }
 }
 
 /// Parse a server frame. Anything that isn't a `message` is ignored.
@@ -74,7 +137,7 @@ pub fn parse_frame(raw: &str) -> Option<Event> {
     Some(Event::Chat { user, content, speech, links, images })
 }
 
-async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context) {
+async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: UnboundedReceiver<TtsRequest>) {
     let send = |event: Event| {
         let ok = tx.send(event).is_ok();
         ctx.request_repaint();
@@ -93,35 +156,59 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context) {
                 if !send(Event::Status("Conectado ✓".into())) {
                     return;
                 }
+                let mut pending: HashMap<u64, Sender<TtsResult>> = HashMap::new();
+                let mut next_id = 0u64;
+                let mut last_seen = tokio::time::Instant::now();
                 loop {
-                    match tokio::time::timeout(IDLE_LIMIT, ws.next()).await {
-                        Ok(Some(Ok(Message::Text(raw)))) => {
-                            if let Some(event) = parse_frame(&raw) {
-                                if !send(event) {
-                                    return;
+                    tokio::select! {
+                        frame = ws.next() => {
+                            last_seen = tokio::time::Instant::now();
+                            match frame {
+                                Some(Ok(Message::Text(raw))) => {
+                                    if let Some(event) = parse_frame(&raw) {
+                                        if !send(event) {
+                                            return;
+                                        }
+                                    } else if let Some((id, result)) = parse_tts_reply(&raw) {
+                                        if let Some(reply) = pending.remove(&id) {
+                                            let _ = reply.send(result);
+                                        }
+                                    }
                                 }
+                                Some(Ok(Message::Close(frame))) => {
+                                    if let Some(f) = frame {
+                                        eprintln!("[ws] cerrado por el servidor: {} {}", f.code, f.reason);
+                                        if !f.reason.is_empty() && !send(Event::Status(format!("Servidor: {}", f.reason))) {
+                                            return;
+                                        }
+                                    }
+                                    break;
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(e)) => {
+                                    eprintln!("[ws] {e}");
+                                    break;
+                                }
+                                None => break,
                             }
                         }
-                        Ok(Some(Ok(Message::Close(frame)))) => {
-                            if let Some(f) = frame {
-                                eprintln!("[ws] cerrado por el servidor: {} {}", f.code, f.reason);
-                                if !f.reason.is_empty() && !send(Event::Status(format!("Servidor: {}", f.reason))) {
-                                    return;
-                                }
+                        Some(req) = tts_rx.recv() => {
+                            next_id += 1;
+                            let body = serde_json::json!({ "type": "tts", "id": next_id, "text": req.text, "voice": req.voice });
+                            if ws.send(Message::text(body.to_string())).await.is_err() {
+                                let _ = req.reply.send(Err("sin conexión con el servidor".into()));
+                                break;
                             }
-                            break;
+                            pending.insert(next_id, req.reply);
                         }
-                        Ok(Some(Ok(_))) => {}
-                        Ok(Some(Err(e))) => {
-                            eprintln!("[ws] {e}");
-                            break;
-                        }
-                        Ok(None) => break,
-                        Err(_) => {
+                        _ = tokio::time::sleep_until(last_seen + IDLE_LIMIT) => {
                             eprintln!("[ws] sin actividad; reconectando");
                             break;
                         }
                     }
+                }
+                for (_, reply) in pending.drain() {
+                    let _ = reply.send(Err("conexión perdida".into()));
                 }
                 if !send(Event::Status(format!("Desconectado. Reintentando en {delay}s…"))) {
                     return;
@@ -139,7 +226,17 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context) {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        // Speech requests made while offline fail at once, so the Edge voice takes over.
+        let wake = tokio::time::sleep(Duration::from_secs(delay));
+        tokio::pin!(wake);
+        loop {
+            tokio::select! {
+                _ = &mut wake => break,
+                Some(req) = tts_rx.recv() => {
+                    let _ = req.reply.send(Err("sin conexión con el servidor".into()));
+                }
+            }
+        }
         delay = (delay * 2).min(60);
     }
 }
@@ -174,6 +271,22 @@ mod tests {
             panic!();
         };
         assert_eq!(speech, "x");
+    }
+
+    #[test]
+    fn parses_tts_replies() {
+        let audio = base64::engine::general_purpose::STANDARD.encode(b"mp3");
+        let ok = format!(r#"{{"type":"tts_audio","id":4,"audio":"{audio}"}}"#);
+        assert_eq!(parse_tts_reply(&ok).unwrap(), (4, Ok(b"mp3".to_vec())));
+        let err = parse_tts_reply(r#"{"type":"tts_error","id":5,"error":"rate limit"}"#).unwrap();
+        assert_eq!(err, (5, Err("rate limit".to_string())));
+        assert!(parse_tts_reply(r#"{"type":"message","id":1}"#).is_none());
+        assert!(parse_tts_reply("not json").is_none());
+    }
+
+    #[test]
+    fn offline_link_fails_at_once() {
+        assert!(TtsLink::offline().synthesize("hola", "v").is_err());
     }
 
     #[test]

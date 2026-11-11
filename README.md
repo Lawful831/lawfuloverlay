@@ -64,7 +64,7 @@ Settings are stored in `~/.discord_chat_overlay/client_settings.json`.
 
 The 🔊 button reads messages aloud: only the message, not the name of who wrote it (the overlay still shows the name). Voices are tried in this order:
 
-1. **Fish Audio**, only in a build that has an API key baked in, and only when a voice id is known: the one in ⚙ → *Voz* → *Voz Fish Audio (ID)*, or the one the message names. The paid model (`s2.1-pro`) is tried first; if it is refused (no credit, rate limit, overload) the free one (`s2.1-pro-free`) is tried.
+1. **Fish Audio**, only when the server has a `FISH_API_KEY` and a voice id is known: the one in ⚙ → *Voz* → *Voz Fish Audio (ID)*, or the one the message names. The client asks the server over the WebSocket; the server calls Fish Audio, so the key never reaches a client. The paid model (`s2.1-pro`) is tried first; if it is refused (no credit, rate limit, overload) the free one (`s2.1-pro-free`) is tried. If the server has no key or refuses (a limit, an error), the next voice takes over.
 2. **Edge TTS** (the voice picked in ⚙ → *Voz*).
 3. The voice built into Windows.
 
@@ -75,18 +75,7 @@ Markup in a chat message:
 | `//ca3007f96ae7499ab87d27ea3599956a// hola` | That message is spoken with that Fish Audio voice (the 32 hex characters at the end of a `fish.audio/m/…` URL). The template is not shown. |
 | `[happy] hola [laughing]` | Text in square brackets is never shown. Fish Audio gets it as an emotion or tone cue; the other voices skip it. The server's own tags (`[Link de …]`, `[GIF]`, `[Imagen]`, `[Archivo]`) still show. |
 
-**Fish Audio key.** The key is read at compile time from the `LAWFUL_FISH_API_KEY` environment variable and is never stored in this repository. Without it the build simply has no Fish Audio.
-
-```bash
-# Git Bash
-LAWFUL_FISH_API_KEY=your-key cargo build --release --locked -p lawful-overlay
-```
-
-`scripts\build.bat` also reads it from a `fish.env` file in the repository root (gitignored), containing one line: `LAWFUL_FISH_API_KEY=your-key`.
-
-A keyed build saves its key to `~/.discord_chat_overlay/fish_key.txt` the first time it runs. When the auto-updater swaps in the public (keyless) release, that exe reads the key from this file, so Fish Audio keeps working after an update. Delete the file to remove the key from the machine.
-
-> A key baked into an exe can be extracted by anyone who has the exe. Keep keyed builds private: the GitHub release workflow builds without a key on purpose. A private build also replaces itself with the public (keyless) release when one is newer, so turn off ⚙ → *Actualizar automáticamente* or set `LAWFUL_OVERLAY_NO_UPDATE=1`.
+**Fish Audio key.** Set `FISH_API_KEY` in the server's `.env` (see the table below) and redeploy the server. The client holds no key and needs no build variable. The server limits each request to 500 characters, each connection to 10 requests per minute, and the whole server to 300 Fish Audio calls per UTC day (constants in `server/src/fish.rs` and `server/src/ws.rs`). Never commit the key.
 
 ### Windows trust
 
@@ -170,6 +159,7 @@ cargo test                 # unit tests + socket policy tests
 | `WS_MAX_FRAMES_PER_S` | ❌     | Frames per second per connection before it is closed (default `20`) |
 | `WS_TLS_CERT`       | ❌       | Certificate chain; enables `wss://` in the app |
 | `WS_TLS_KEY`        | ❌       | Private key matching `WS_TLS_CERT`             |
+| `FISH_API_KEY`      | ❌       | Fish Audio API key. Unset = no Fish Audio voices; clients fall back to Edge and Windows. Never logged |
 
 ---
 

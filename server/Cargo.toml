@@ -17,6 +17,7 @@ name = "mock-server"
 path = "src/bin/mock.rs"
 
 [dependencies]
+base64 = "0.22.1"
 dotenvy = "0.15.7"
 futures-util = "0.3.34"
 rand = "0.10.3"
@@ -32,4 +33,5 @@ tokio-rustls = "0.26.6"
 tokio-tungstenite = "0.30.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ureq = "3"
 url = "2.5.8"

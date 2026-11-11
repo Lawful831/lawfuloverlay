@@ -1,27 +1,16 @@
-//! Text to speech: Fish Audio when this build has a key and a voice id is
-//! known, then Edge TTS, then the local Windows voice.
+//! Text to speech: Fish Audio (requested from the server, which holds the API
+//! key) when a voice id is known, then Edge TTS, then the local Windows voice.
 //!
 //! Speech runs on its own thread so a slow synthesis never stalls the UI.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::net::Event;
+use crate::net::{Event, TtsLink};
 use crate::text::{clean_tts_text, parse_markup, strip_brackets};
-
-const FISH_TTS_URL: &str = "https://api.fish.audio/v1/tts";
-/// Tried in order: the paid model, then the free tier when the paid one is
-/// refused (no credit, rate limit, overload). Both are in the S2 family,
-/// which reads `[cues]` in the text as emotion and tone directions.
-const FISH_MODELS: [&str; 2] = ["s2.1-pro", "s2.1-pro-free"];
-/// How long the paid model is skipped after it refuses a request.
-const FISH_PAID_RETRY: Duration = Duration::from_secs(600);
-const FISH_TIMEOUT: Duration = Duration::from_secs(60);
-const FISH_MAX_AUDIO: u64 = 32 << 20;
 
 struct Job {
     /// Generation when queued; a job from an older generation is dropped.
@@ -73,7 +62,7 @@ pub struct Tts {
 }
 
 impl Tts {
-    pub fn new(edge_voice: &str, fish_voice: &str, events: Sender<Event>, ctx: egui::Context) -> Self {
+    pub fn new(edge_voice: &str, fish_voice: &str, events: Sender<Event>, ctx: egui::Context, link: TtsLink) -> Self {
         let (jobs, queue) = mpsc::channel::<Job>();
         let generation = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicBool::new(false));
@@ -89,7 +78,7 @@ impl Tts {
                         continue;
                     }
                     let voices = voices.lock().map(|v| v.clone()).unwrap_or_default();
-                    if !platform::speak(&job.speech, &voices) {
+                    if !platform::speak(&job.speech, &voices, &link) {
                         let _ = events.send(Event::TtsFailed);
                         ctx.request_repaint();
                     }
@@ -175,103 +164,6 @@ fn synthesize_edge(text: &str, voice: &str) -> Result<Vec<u8>, String> {
     Ok(audio.audio_bytes)
 }
 
-/// Why a Fish Audio request gave no audio. The text never contains the key.
-#[derive(Debug)]
-struct FishError {
-    /// HTTP status, or 0 when the service was not reached.
-    status: u16,
-    message: String,
-}
-
-impl FishError {
-    /// A bad key (401) or a bad voice id or request (400, 404, 422) fails the
-    /// same way on the free model; anything else is worth one more try there.
-    fn free_model_may_work(&self) -> bool {
-        self.status != 0 && !matches!(self.status, 400 | 401 | 404 | 422)
-    }
-}
-
-impl std::fmt::Display for FishError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.status {
-            0 => write!(f, "{}", self.message),
-            status => write!(f, "HTTP {status} {}", self.message),
-        }
-    }
-}
-
-/// Fish Audio speech as mp3: the paid model, then the free one when the paid
-/// one is refused. `voice` is a model id (`reference_id`); empty uses the
-/// service's default voice.
-fn synthesize_fish(text: &str, voice: &str, key: &str) -> Result<Vec<u8>, String> {
-    // After a refusal the paid model is left alone for a while, so each
-    // message does not wait on a request that is known to fail.
-    static PAID_REFUSED: Mutex<Option<Instant>> = Mutex::new(None);
-    let refused_at = PAID_REFUSED.lock().ok().and_then(|at| *at);
-    let skip_paid = refused_at.is_some_and(|at| at.elapsed() < FISH_PAID_RETRY);
-
-    let mut last = String::new();
-    for (i, model) in FISH_MODELS.into_iter().enumerate().skip(usize::from(skip_paid)) {
-        match fish_request(text, voice, key, model) {
-            Ok(audio) => return Ok(audio),
-            Err(e) => {
-                last = format!("{model}: {e}");
-                if !e.free_model_may_work() {
-                    break;
-                }
-                if i == 0 {
-                    eprintln!("[tts] fish audio {last}");
-                    if let Ok(mut at) = PAID_REFUSED.lock() {
-                        *at = Some(Instant::now());
-                    }
-                }
-            }
-        }
-    }
-    Err(last)
-}
-
-fn fish_request(text: &str, voice: &str, key: &str, model: &str) -> Result<Vec<u8>, FishError> {
-    let mut body = serde_json::json!({ "text": text, "format": "mp3", "mp3_bitrate": 128 });
-    if !voice.is_empty() {
-        body["reference_id"] = voice.into();
-    }
-    crate::install_tls_provider();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(FISH_TIMEOUT))
-        .http_status_as_error(false)
-        .build()
-        .into();
-    let fail = |status: u16, message: String| FishError { status, message: message.replace(key, "***") };
-    let mut resp = agent
-        .post(FISH_TTS_URL)
-        .header("Authorization", &format!("Bearer {key}"))
-        .header("Content-Type", "application/json")
-        .header("model", model)
-        .send(body.to_string())
-        .map_err(|e| fail(0, e.to_string()))?;
-    let status = resp.status().as_u16();
-    if status != 200 {
-        // `{"status": 402, "message": "..."}`
-        let detail = resp.body_mut().with_config().limit(4096).read_to_string().unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&detail)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
-            .unwrap_or_default();
-        return Err(fail(status, message));
-    }
-    let audio = resp
-        .body_mut()
-        .with_config()
-        .limit(FISH_MAX_AUDIO)
-        .read_to_vec()
-        .map_err(|e| fail(0, e.to_string()))?;
-    if audio.is_empty() {
-        return Err(fail(0, "empty audio".into()));
-    }
-    Ok(audio)
-}
-
 #[cfg(windows)]
 mod platform {
     use std::os::windows::ffi::OsStrExt;
@@ -284,19 +176,15 @@ mod platform {
     };
     use windows_sys::Win32::Media::Multimedia::mciSendStringW;
 
-    use super::{synthesize_edge, synthesize_fish, Speech, Voices};
-    use crate::config::fish_api_key;
+    use super::{synthesize_edge, Speech, Voices};
+    use crate::net::TtsLink;
 
-    /// Fish Audio (the message's own voice, else the one in the settings),
-    /// then the Edge voice, then the Windows voice.
-    pub fn speak(speech: &Speech, voices: &Voices) -> bool {
+    /// Fish Audio through the server (the message's own voice, else the one in
+    /// the settings), then the Edge voice, then the Windows voice.
+    pub fn speak(speech: &Speech, voices: &Voices, link: &TtsLink) -> bool {
         let fish_voice = speech.voice.as_deref().unwrap_or(&voices.fish);
-        if !fish_voice.is_empty() {
-            if let Some(key) = fish_api_key() {
-                if fish(&speech.fish, fish_voice, &key) {
-                    return true;
-                }
-            }
+        if !fish_voice.is_empty() && fish(&speech.fish, fish_voice, link) {
+            return true;
         }
         // Nothing left once the cues are gone: not a failure.
         speech.plain.is_empty() || edge(&speech.plain, &voices.edge) || windows_voice(&speech.plain)
@@ -321,8 +209,8 @@ mod platform {
         played
     }
 
-    fn fish(text: &str, voice: &str, key: &str) -> bool {
-        match synthesize_fish(text, voice, key) {
+    fn fish(text: &str, voice: &str, link: &TtsLink) -> bool {
+        match link.synthesize(text, voice) {
             Ok(audio) => play(audio),
             Err(e) => {
                 eprintln!("[tts] fish audio {e}");
@@ -387,7 +275,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    pub fn speak(_speech: &super::Speech, _voices: &super::Voices) -> bool {
+    pub fn speak(_speech: &super::Speech, _voices: &super::Voices, _link: &crate::net::TtsLink) -> bool {
         false
     }
 }
@@ -424,7 +312,7 @@ mod tests {
     #[ignore = "plays audio, needs network"]
     fn speaks_like_the_app() {
         let voices = Voices { edge: "es-MX-DaliaNeural".into(), fish: String::new() };
-        assert!(platform::speak(&Speech::plain("Texto a voz activado"), &voices));
+        assert!(platform::speak(&Speech::plain("Texto a voz activado"), &voices, &crate::net::TtsLink::offline()));
     }
 
     #[test]
@@ -439,54 +327,6 @@ mod tests {
         let s = Speech::chat("hola");
         assert_eq!((s.fish.as_str(), s.plain.as_str(), s.voice), ("hola", "hola", None));
         assert_eq!(Speech::chat("[laughing]").plain, "");
-    }
-
-    #[test]
-    fn free_model_is_tried_when_the_paid_one_is_refused() {
-        let err = |status| FishError { status, message: String::new() };
-        for status in [402, 403, 429, 500, 503] {
-            assert!(err(status).free_model_may_work(), "{status}");
-        }
-        for status in [0, 400, 401, 404, 422] {
-            assert!(!err(status).free_model_may_work(), "{status}");
-        }
-        assert_eq!(FISH_MODELS, ["s2.1-pro", "s2.1-pro-free"]);
-    }
-
-    /// The key baked into this build, or `LAWFUL_FISH_API_KEY` at run time.
-    fn fish_test_key() -> String {
-        crate::config::fish_api_key()
-            .or_else(|| std::env::var("LAWFUL_FISH_API_KEY").ok().filter(|k| !k.trim().is_empty()))
-            .expect("set LAWFUL_FISH_API_KEY to run this test")
-            .trim()
-            .to_string()
-    }
-
-    /// Hits the live Fish Audio service (may spend credit). `LAWFUL_FISH_TEST_VOICE`
-    /// picks the voice id; without it the service's default voice answers.
-    #[test]
-    #[ignore = "needs network and a Fish Audio key"]
-    fn fish_service_returns_mp3() {
-        let voice = std::env::var("LAWFUL_FISH_TEST_VOICE").unwrap_or_default();
-        let audio = synthesize_fish("[happy] Hola, esto es una prueba", &voice, &fish_test_key()).expect("synthesis");
-        assert!(audio.len() > 1000, "only {} bytes", audio.len());
-    }
-
-    /// The free model on its own, as used when the paid one is refused.
-    #[test]
-    #[ignore = "needs network and a Fish Audio key"]
-    fn fish_free_model_returns_mp3() {
-        let audio = fish_request("Hola, esto es una prueba", "", &fish_test_key(), FISH_MODELS[1]).expect("synthesis");
-        assert!(audio.len() > 1000, "only {} bytes", audio.len());
-    }
-
-    #[test]
-    #[ignore = "needs network"]
-    fn fish_errors_do_not_leak_the_key() {
-        let key = "not-a-real-key-0123456789";
-        let err = synthesize_fish("hola", "", key).expect_err("a made-up key must be refused");
-        assert!(err.contains("HTTP 40"), "{err}");
-        assert!(!err.contains(key), "{err}");
     }
 
     /// Hits the live Edge service: `cargo test -p lawful-overlay -- --ignored`.

@@ -35,7 +35,6 @@ fn main() -> eframe::Result {
     eprintln!("LawfulOverlay — Cliente");
     install_tls_provider();
     updater::cleanup();
-    config::persist_fish_key();
     let cfg = config::Config::load();
     eprintln!("Servidor: {}", text::redact_url(&cfg.ws_url));
 

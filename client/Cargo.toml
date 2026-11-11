@@ -1,6 +1,6 @@
 [package]
 name = "lawful-overlay"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 description = "LawfulOverlay: transparent always-on-top Discord chat overlay"
 license = "MIT"
@@ -8,6 +8,7 @@ repository = "https://github.com/Lawful831/lawfuloverlay"
 build = "build.rs"
 
 [dependencies]
+base64 = "0.22.1"
 dirs = "7.0.0"
 eframe = { version = "0.37.0", default-features = false, features = ["clipboard", "default_fonts", "links", "wgpu"] }
 egui_extras = { version = "0.37.0", default-features = false, features = ["http", "image", "gif", "webp"] }

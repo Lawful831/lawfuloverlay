@@ -1727,8 +1727,9 @@ dependencies = [
 
 [[package]]
 name = "lawful-overlay"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "eframe",
  "egui_extras",
@@ -1752,6 +1753,7 @@ dependencies = [
 name = "lawful-overlay-server"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "dotenvy",
  "futures-util",
  "rand 0.10.3",
@@ -1767,6 +1769,7 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "url",
 ]
 

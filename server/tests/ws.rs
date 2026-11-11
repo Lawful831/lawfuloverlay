@@ -29,6 +29,7 @@ fn policy() -> Policy {
         max_per_ip: 2,
         max_frame_bytes: 1024,
         max_frames_per_s: 5,
+        tts: None,
     }
 }
 

@@ -11,6 +11,7 @@ use tracing::{error, info};
 async fn main() -> ExitCode {
     let _ = dotenvy::dotenv();
     lawful_overlay_server::init_logging();
+    lawful_overlay_server::fish::install_tls_provider();
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -60,6 +61,11 @@ async fn run() -> Result<(), String> {
 
     let hub = Arc::new(Hub::new());
     let policy = Arc::new(Policy::from_config(&cfg));
+    if policy.tts.is_some() {
+        info!("Fish Audio voices: on");
+    } else {
+        info!("Fish Audio voices: off (FISH_API_KEY is not set)");
+    }
     let server = ws::serve(listener, Arc::clone(&hub), policy, tls);
 
     if ws_only {

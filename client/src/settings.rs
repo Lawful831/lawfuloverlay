@@ -6,7 +6,7 @@
 use eframe::egui::{self, Color32, ComboBox, DragValue, Frame, RichText};
 
 use crate::color::{hex_or, parse_hex, to_hex};
-use crate::config::{config_path, fish_api_key, Config, BG_STYLES};
+use crate::config::{config_path, Config, BG_STYLES};
 
 const DARK: Color32 = Color32::from_rgb(0x1E, 0x1F, 0x22);
 const MID: Color32 = Color32::from_rgb(0x2B, 0x2D, 0x31);
@@ -222,10 +222,8 @@ impl Settings {
                 }
             });
         });
-        let fish = fish_api_key().is_some();
         row(ui, "Voz Fish Audio (ID)", |ui| {
-            ui.add_enabled(
-                fish,
+            ui.add(
                 egui::TextEdit::singleline(&mut self.draft.fish_voice)
                     .hint_text("vacío = no usar Fish Audio")
                     .desired_width(260.0)
@@ -235,18 +233,13 @@ impl Settings {
         ui.separator();
         hint(
             ui,
-            if fish {
-                "Orden: Fish Audio (si hay un ID de voz), luego Edge TTS y por\n\
-                 último la voz local de Windows.\n\
-                 Un mensaje puede elegir su voz con //ID_de_voz// (32 caracteres\n\
-                 hexadecimales). Eso y el texto entre [corchetes] no se muestran;\n\
-                 Fish Audio usa los corchetes como emociones: [happy], [whispering]…\n\
-                 La cola de voz se limpia al cambiar de voz."
-            } else {
-                "Usa Edge TTS; si falla, usa la voz local de Windows.\n\
-                 Fish Audio no está disponible: esta compilación no incluye clave.\n\
-                 La cola de voz se limpia al cambiar de voz."
-            },
+            "Orden: Fish Audio (si hay un ID de voz), luego Edge TTS y por
+             último la voz local de Windows. Fish Audio lo pide el servidor;
+             sin clave en el servidor se usa Edge TTS.
+             Un mensaje puede elegir su voz con //ID_de_voz// (32 caracteres
+             hexadecimales). Eso y el texto entre [corchetes] no se muestran;
+             Fish Audio usa los corchetes como emociones: [happy], [whispering]…
+             La cola de voz se limpia al cambiar de voz.",
         );
     }
 }

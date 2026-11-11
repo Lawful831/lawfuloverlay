@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod discord;
+pub mod fish;
 pub mod text;
 pub mod ws;
 
