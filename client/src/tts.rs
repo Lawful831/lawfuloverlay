@@ -214,6 +214,7 @@ mod platform {
             Ok(audio) => play(audio),
             Err(e) => {
                 eprintln!("[tts] fish audio {e}");
+                crate::telemetry::report("tts_fish_failed", &e);
                 false
             }
         }
@@ -224,6 +225,7 @@ mod platform {
             Ok(audio) => play(audio),
             Err(e) => {
                 eprintln!("[tts] edge: {e}");
+                crate::telemetry::report("tts_edge_failed", &e.to_string());
                 false
             }
         }
@@ -239,6 +241,7 @@ mod platform {
             Ok(()) => true,
             Err(e) => {
                 eprintln!("[tts] playback: {e}");
+                crate::telemetry::report("tts_playback_failed", &e);
                 false
             }
         }
@@ -266,6 +269,7 @@ mod platform {
                 Ok(()) => true,
                 Err(e) => {
                     eprintln!("[tts] windows voice: {e}");
+                    crate::telemetry::report("tts_windows_voice_failed", &e.to_string());
                     false
                 }
             }

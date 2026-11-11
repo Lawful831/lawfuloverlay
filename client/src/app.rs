@@ -99,6 +99,7 @@ fn install_fonts(ctx: &egui::Context, family: &str, bold: bool) {
         stack.insert(0, "overlay".into());
     } else {
         eprintln!("[fuente] no se encontró {family}; usando la fuente por defecto");
+        crate::telemetry::report("font_missing", family);
     }
     fonts.families.insert(overlay_family(), stack);
     ctx.set_fonts(fonts);
@@ -155,7 +156,8 @@ pub struct OverlayApp {
     fade: Option<Fade>,
     last_bg: Option<[u8; 3]>,
     next_detect: Instant,
-    capture_excluded: bool,
+    /// Whether the capture setting has been applied to the window.
+    capture_applied: bool,
     transparent_set: bool,
     /// Whether the title bar is currently shown.
     hovered: bool,
@@ -191,7 +193,7 @@ impl OverlayApp {
             message: Rich::plain("Esperando mensajes…"),
             fade: None,
             last_bg: None,
-            capture_excluded: false,
+            capture_applied: false,
             transparent_set: false,
             // Shown at start so it is discoverable; hover rules apply after the first visit.
             hovered: true,
@@ -265,16 +267,23 @@ impl OverlayApp {
     /// Sample the pixels behind the overlay and pick readable colours.
     fn detect(&mut self, ctx: &egui::Context) {
         self.next_detect = Instant::now() + Duration::from_millis(u64::from(self.cfg.detect_interval));
-        if !self.capture_excluded {
-            self.capture_excluded = sample::exclude_from_capture(WINDOW_TITLE);
-        }
         let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
         let ppp = ctx.pixels_per_point();
         let side = self.cfg.detect_sample_px as f32;
-        let cx = (outer.min.x + outer.width() / 2.0) * ppp;
         let bar_h = if self.hovered { FRAME_H } else { 0.0 };
         let cy = (outer.min.y + bar_h + (outer.height() - bar_h) / 2.0) * ppp;
+        // Hidden from capture, the overlay's own pixels are not seen, so sample
+        // right behind it. Otherwise sample beside the window (left, or right
+        // at the screen edge) so the overlay's text does not feed back.
+        let cx = if self.cfg.hide_from_capture {
+            (outer.min.x + outer.width() / 2.0) * ppp
+        } else if outer.min.x * ppp >= side + 4.0 {
+            outer.min.x * ppp - side / 2.0 - 2.0
+        } else {
+            outer.max.x * ppp + side / 2.0 + 2.0
+        };
         let Some(bg) = sample::sample_bg((cx - side / 2.0) as i32, (cy - side / 2.0) as i32, side as i32) else {
+            crate::telemetry::report("sample_failed", "GDI BitBlt");
             return;
         };
 
@@ -305,6 +314,9 @@ impl OverlayApp {
         if new.tts_voice != self.cfg.tts_voice || new.fish_voice != self.cfg.fish_voice {
             self.tts.reset_queue();
             self.tts.set_voices(&new.tts_voice, &new.fish_voice);
+        }
+        if new.hide_from_capture != self.cfg.hide_from_capture {
+            self.capture_applied = false;
         }
         self.cfg = new;
         self.cfg.save();
@@ -542,6 +554,12 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if !self.capture_applied {
+            self.capture_applied = sample::set_capture_hidden(WINDOW_TITLE, self.cfg.hide_from_capture);
+            if !self.capture_applied {
+                crate::telemetry::report("capture_affinity_failed", "SetWindowDisplayAffinity");
+            }
+        }
         if !self.transparent_set {
             self.transparent_set = sample::make_transparent(WINDOW_TITLE);
             ctx.request_repaint();
@@ -642,6 +660,7 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
             };
             let best = adapters.iter().max_by_key(|a| rank(a)).ok_or("no graphics adapter")?;
             eprintln!("[gpu] {:?} {}", best.get_info().backend, best.get_info().name);
+            crate::telemetry::report("gpu", &format!("{:?} {}", best.get_info().backend, best.get_info().name));
             Ok(best.clone())
         }));
     }

@@ -18,6 +18,7 @@ mod rich;
 mod sample;
 mod settings;
 mod text;
+mod telemetry;
 mod tts;
 mod updater;
 
@@ -34,6 +35,8 @@ pub(crate) fn install_tls_provider() {
 fn main() -> eframe::Result {
     eprintln!("LawfulOverlay — Cliente");
     install_tls_provider();
+    telemetry::install_panic_hook();
+    telemetry::report_previous_crash();
     updater::cleanup();
     let cfg = config::Config::load();
     eprintln!("Servidor: {}", text::redact_url(&cfg.ws_url));

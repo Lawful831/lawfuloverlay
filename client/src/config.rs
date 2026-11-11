@@ -23,6 +23,9 @@ pub struct Config {
     pub overlay_w: u32,
     pub overlay_h: u32,
     pub always_on_top: bool,
+    /// Keep the overlay out of screen captures. Off by default: when on, Discord
+    /// screen shares and recordings do not show it either.
+    pub hide_from_capture: bool,
     /// Images and gifs under the message.
     pub show_images: bool,
     /// Tallest an image is drawn, in px.
@@ -69,6 +72,7 @@ impl Default for Config {
             overlay_w: 440,
             overlay_h: 110,
             always_on_top: true,
+            hide_from_capture: false,
             show_images: true,
             image_max_h: 160,
             font_family: "Arial".into(),

@@ -117,24 +117,26 @@ pub fn make_transparent(_title: &str) -> bool {
     true
 }
 
-/// Keep this app's own window out of screen captures, so the sample sees what
-/// is *behind* the overlay rather than the overlay's own text and badge.
+/// Hide (or show again) this app's window in screen captures. Hidden, it is
+/// also missing from Discord screen shares and recordings.
 #[cfg(windows)]
-pub fn exclude_from_capture(title: &str) -> bool {
+pub fn set_capture_hidden(title: &str, hidden: bool) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetWindowDisplayAffinity};
 
+    const WDA_NONE: u32 = 0;
     const WDA_EXCLUDEFROMCAPTURE: u32 = 0x0000_0011;
+    let affinity = if hidden { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
     let wide: Vec<u16> = std::ffi::OsStr::new(title).encode_wide().chain(Some(0)).collect();
     // SAFETY: `wide` is NUL-terminated and outlives the call.
     unsafe {
         let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        !hwnd.is_null() && SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0
+        !hwnd.is_null() && SetWindowDisplayAffinity(hwnd, affinity) != 0
     }
 }
 
 #[cfg(not(windows))]
-pub fn exclude_from_capture(_title: &str) -> bool {
+pub fn set_capture_hidden(_title: &str, _hidden: bool) -> bool {
     true
 }
 

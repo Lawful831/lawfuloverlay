@@ -270,6 +270,7 @@ fn update_once(tx: &Sender<Event>, ctx: &egui::Context, exe: &Path) -> Result<()
         // download the same file again, so wait for the regular check.
         let _ = std::fs::remove_file(&new);
         eprintln!("[update] {e}");
+        crate::telemetry::report("update_install_failed", &e);
         say(format!("No se pudo instalar {tag}: mueve LawfulOverlay a una carpeta con permisos de escritura."));
         return Ok(());
     }
@@ -297,6 +298,7 @@ pub fn spawn(tx: Sender<Event>, ctx: egui::Context) {
             Ok(()) => CHECK_EVERY,
             Err(e) => {
                 eprintln!("[update] {e}");
+                crate::telemetry::report("update_failed", &e);
                 RETRY_AFTER
             }
         };

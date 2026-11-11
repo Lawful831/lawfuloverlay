@@ -11,6 +11,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::telemetry;
 use crate::text::{is_web_url, redact_url};
 
 /// What the background threads tell the UI.
@@ -159,8 +160,18 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: 
                 let mut pending: HashMap<u64, Sender<TtsResult>> = HashMap::new();
                 let mut next_id = 0u64;
                 let mut last_seen = tokio::time::Instant::now();
+                let mut flush = tokio::time::interval(Duration::from_secs(2));
                 loop {
                     tokio::select! {
+                        _ = flush.tick() => {
+                            let batch = telemetry::take();
+                            for (i, (event, detail)) in batch.iter().enumerate() {
+                                if ws.send(Message::text(telemetry::frame(event, detail))).await.is_err() {
+                                    telemetry::requeue(batch[i..].to_vec());
+                                    break;
+                                }
+                            }
+                        }
                         frame = ws.next() => {
                             last_seen = tokio::time::Instant::now();
                             match frame {
@@ -178,6 +189,7 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: 
                                 Some(Ok(Message::Close(frame))) => {
                                     if let Some(f) = frame {
                                         eprintln!("[ws] cerrado por el servidor: {} {}", f.code, f.reason);
+                                    telemetry::report("ws_closed", &format!("{} {}", f.code, f.reason));
                                         if !f.reason.is_empty() && !send(Event::Status(format!("Servidor: {}", f.reason))) {
                                             return;
                                         }
@@ -187,6 +199,7 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: 
                                 Some(Ok(_)) => {}
                                 Some(Err(e)) => {
                                     eprintln!("[ws] {e}");
+                                    telemetry::report("ws_error", &e.to_string());
                                     break;
                                 }
                                 None => break,
@@ -203,6 +216,7 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: 
                         }
                         _ = tokio::time::sleep_until(last_seen + IDLE_LIMIT) => {
                             eprintln!("[ws] sin actividad; reconectando");
+                            telemetry::report("ws_idle", "sin actividad; reconectando");
                             break;
                         }
                     }
@@ -216,11 +230,13 @@ async fn listen(url: String, tx: Sender<Event>, ctx: egui::Context, mut tts_rx: 
             }
             Ok(Err(e)) => {
                 eprintln!("[ws] {e} — reintento en {delay}s");
+                telemetry::report("ws_connect_failed", &e.to_string());
                 if !send(Event::Status(format!("Desconectado. Reintentando en {delay}s…"))) {
                     return;
                 }
             }
             Err(_) => {
+                telemetry::report("ws_connect_timeout", "sin respuesta");
                 if !send(Event::Status(format!("Sin respuesta. Reintentando en {delay}s…"))) {
                     return;
                 }

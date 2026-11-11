@@ -52,6 +52,28 @@ struct TtsRequest {
     text: String,
     #[serde(default)]
     voice: String,
+    // `telemetry` frames: `{"type":"telemetry","event":"tts_failed","detail":"...","version":"0.7.0","os":"windows"}`.
+    #[serde(default)]
+    event: String,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    os: String,
+}
+
+/// Per connection: `telemetry` reports logged in each window; the rest are dropped.
+const TELEMETRY_PER_WINDOW: u32 = 30;
+/// Longest field kept from a report, in characters.
+const TELEMETRY_FIELD_CHARS: usize = 300;
+
+/// One line of a client report: control characters out, length capped.
+fn clean_report_field(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(TELEMETRY_FIELD_CHARS)
+        .collect()
 }
 
 /// Limits on one connection's `tts` requests: one at a time, and a few per window.
@@ -418,6 +440,8 @@ where
     // Fish Audio answers come back from blocking threads through this channel.
     let (tts_done, mut tts_replies) = mpsc::unbounded_channel::<String>();
     let mut tts = TtsGate::default();
+    let mut window_reports: Option<Instant> = None;
+    let mut reports: u32 = 0;
 
     loop {
         tokio::select! {
@@ -438,6 +462,24 @@ where
                     // Everything else a client sends is discarded, except `tts` requests.
                     let Message::Text(raw) = msg else { continue };
                     let Ok(req) = serde_json::from_str::<TtsRequest>(&raw) else { continue };
+                    if req.kind == "telemetry" {
+                        if window_reports.is_none_or(|w: Instant| w.elapsed() >= TTS_WINDOW) {
+                            window_reports = Some(Instant::now());
+                            reports = 0;
+                        }
+                        reports += 1;
+                        if reports <= TELEMETRY_PER_WINDOW {
+                            warn!(
+                                target: "telemetry",
+                                "client {peer} v{} ({}) {}: {}",
+                                clean_report_field(&req.version),
+                                clean_report_field(&req.os),
+                                clean_report_field(&req.event),
+                                clean_report_field(&req.detail),
+                            );
+                        }
+                        continue;
+                    }
                     if req.kind != "tts" {
                         continue;
                     }
@@ -533,6 +575,12 @@ mod tests {
         assert!(!p.token_allowed("/"));
         assert!(!p.token_allowed("/?token="));
         assert!(!policy("", &[]).token_allowed("/?token="));
+    }
+
+    #[test]
+    fn report_fields_are_one_short_line() {
+        assert_eq!(clean_report_field("a\nb\r\x1b[31m"), "a b  [31m");
+        assert_eq!(clean_report_field(&"x".repeat(1000)).chars().count(), TELEMETRY_FIELD_CHARS);
     }
 
     #[test]
