@@ -2,6 +2,7 @@
 
 use lawful_overlay_server::voice::{speech_for_tts, Voice};
 use serenity::all::ChannelId;
+use songbird::error::{ConnectionError, JoinError};
 
 #[test]
 fn speech_for_tts_trims_and_rejects_blank() {
@@ -34,4 +35,17 @@ fn voice_channel_tracking() {
     assert_eq!(voice.channel(), Some(ch));
     voice.set_channel(None);
     assert_eq!(voice.channel(), None);
+}
+
+#[test]
+fn join_error_debug_format_includes_inner_details() {
+    let dropped = JoinError::Dropped;
+    let dropped_dbg = format!("{dropped:?}");
+    assert!(!dropped_dbg.is_empty());
+    assert!(dropped_dbg.contains("Dropped"), "{dropped_dbg}");
+
+    let driver_err = JoinError::Driver(ConnectionError::TimedOut);
+    let msg = format!("no se pudo unir al canal de voz: {driver_err:?}");
+    assert!(msg.contains("Driver"), "{msg}");
+    assert!(msg.contains("TimedOut"), "{msg}");
 }

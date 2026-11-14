@@ -53,7 +53,7 @@ pub async fn join(ctx: &Context, voice: &Voice, channel_id: ChannelId) -> Result
     let call = manager
         .join(guild_id, channel_id)
         .await
-        .map_err(|e| format!("no se pudo unir al canal de voz: {e}"))?;
+        .map_err(|e| format!("no se pudo unir al canal de voz: {e:?}"))?;
     call.lock()
         .await
         .deafen(true)
