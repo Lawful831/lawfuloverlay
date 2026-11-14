@@ -97,7 +97,9 @@ pub fn link_urls(text: &str) -> Vec<String> {
     URL_RE
         .find_iter(text)
         .map(|m| match m.as_str() {
-            u if u.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("www.")) => format!("https://{u}"),
+            u if u.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("www.")) => {
+                format!("https://{u}")
+            }
             u => u.to_string(),
         })
         .collect()
@@ -157,19 +159,26 @@ fn is_gif(att: &Attachment) -> bool {
 
 /// What the message carries. Link previews (embeds) are ignored when the
 /// message has text of its own: the text already names them.
-pub fn media_kind(attachments: &[Attachment], embeds: &[Embed], content: &str) -> Option<MediaKind> {
+pub fn media_kind(
+    attachments: &[Attachment],
+    embeds: &[Embed],
+    content: &str,
+) -> Option<MediaKind> {
     let embeds: &[Embed] = if content.is_empty() { embeds } else { &[] };
     if attachments.iter().any(is_gif)
-        || embeds
-            .iter()
-            .any(|e| e.kind.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("gifv")))
+        || embeds.iter().any(|e| {
+            e.kind
+                .as_deref()
+                .is_some_and(|k| k.eq_ignore_ascii_case("gifv"))
+        })
     {
         return Some(MediaKind::Gif);
     }
-    if attachments
-        .iter()
-        .any(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")))
-        || embeds.iter().any(|e| e.has_image)
+    if attachments.iter().any(|a| {
+        a.content_type
+            .as_deref()
+            .is_some_and(|t| t.starts_with("image/"))
+    }) || embeds.iter().any(|e| e.has_image)
     {
         return Some(MediaKind::Image);
     }
@@ -186,15 +195,20 @@ const MAX_IMAGES: usize = 4;
 pub fn image_urls(attachments: &[Attachment], embeds: &[Embed], content: &str) -> Vec<String> {
     let attached = attachments
         .iter()
-        .filter(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")) || is_gif(a))
+        .filter(|a| {
+            a.content_type
+                .as_deref()
+                .is_some_and(|t| t.starts_with("image/"))
+                || is_gif(a)
+        })
         .map(|a| a.url.clone());
     let previews = embeds
         .iter()
         .filter(|e| {
             content.is_empty()
-                || e.kind
-                    .as_deref()
-                    .is_some_and(|k| k.eq_ignore_ascii_case("image") || k.eq_ignore_ascii_case("gifv"))
+                || e.kind.as_deref().is_some_and(|k| {
+                    k.eq_ignore_ascii_case("image") || k.eq_ignore_ascii_case("gifv")
+                })
         })
         .filter_map(|e| e.image_url.clone());
     attached
@@ -270,12 +284,23 @@ mod tests {
     fn images() {
         let png = att(Some("image/png"), "a.png");
         let pdf = att(None, "a.pdf");
-        assert_eq!(image_urls(&[png, pdf], &[], "x"), ["https://media.example/a.png"]);
+        assert_eq!(
+            image_urls(&[png, pdf], &[], "x"),
+            ["https://media.example/a.png"]
+        );
         // An ordinary link preview only when the message has no text.
         assert!(image_urls(&[], &[embed("rich")], "https://youtu.be/x").is_empty());
-        assert_eq!(image_urls(&[], &[embed("rich")], ""), ["https://media.example/rich.png"]);
-        assert_eq!(image_urls(&[], &[embed("gifv")], "https://tenor.com/x"), ["https://media.example/gifv.png"]);
-        let many: Vec<_> = (0..9).map(|i| att(Some("image/png"), &format!("{i}.png"))).collect();
+        assert_eq!(
+            image_urls(&[], &[embed("rich")], ""),
+            ["https://media.example/rich.png"]
+        );
+        assert_eq!(
+            image_urls(&[], &[embed("gifv")], "https://tenor.com/x"),
+            ["https://media.example/gifv.png"]
+        );
+        let many: Vec<_> = (0..9)
+            .map(|i| att(Some("image/png"), &format!("{i}.png")))
+            .collect();
         assert_eq!(image_urls(&many, &[], "").len(), MAX_IMAGES);
     }
 
@@ -294,9 +319,18 @@ mod tests {
 
     #[test]
     fn links() {
-        assert_eq!(humanize_links("mira https://youtube.com/watch?v=x", false), "mira Link de youtube");
-        assert_eq!(humanize_links("mira https://youtube.com/x.", false), "mira Link de youtube.");
-        assert_eq!(humanize_links("Link (https://youtu.be/x), ok", false), "Link (Link de youtube), ok");
+        assert_eq!(
+            humanize_links("mira https://youtube.com/watch?v=x", false),
+            "mira Link de youtube"
+        );
+        assert_eq!(
+            humanize_links("mira https://youtube.com/x.", false),
+            "mira Link de youtube."
+        );
+        assert_eq!(
+            humanize_links("Link (https://youtu.be/x), ok", false),
+            "Link (Link de youtube), ok"
+        );
         assert_eq!(humanize_links("https://.", false), "https://.");
         assert_eq!(
             humanize_links("a www.twitch.tv/b y https://t.co/z", false),
@@ -311,26 +345,53 @@ mod tests {
 
     #[test]
     fn speech() {
-        assert_eq!(speech_text(&[att(Some("image/png"), "")], &[], ""), "Compartido una imagen");
-        assert_eq!(speech_text(&[att(Some("image/gif"), "a.gif")], &[], ""), "Compartido un gif");
-        assert_eq!(speech_text(&[att(None, "a.GIF")], &[], ""), "Compartido un gif");
-        assert_eq!(speech_text(&[att(None, "a.pdf")], &[], ""), "Compartido un archivo");
+        assert_eq!(
+            speech_text(&[att(Some("image/png"), "")], &[], ""),
+            "Compartido una imagen"
+        );
+        assert_eq!(
+            speech_text(&[att(Some("image/gif"), "a.gif")], &[], ""),
+            "Compartido un gif"
+        );
+        assert_eq!(
+            speech_text(&[att(None, "a.GIF")], &[], ""),
+            "Compartido un gif"
+        );
+        assert_eq!(
+            speech_text(&[att(None, "a.pdf")], &[], ""),
+            "Compartido un archivo"
+        );
         assert_eq!(
             speech_text(&[att(Some("image/png"), "")], &[], "https://youtu.be/x"),
             "Link de youtube Compartido una imagen"
         );
         assert_eq!(speech_text(&[], &[embed("gifv")], ""), "Compartido un gif");
-        assert_eq!(speech_text(&[], &[embed("rich")], ""), "Compartido una imagen");
+        assert_eq!(
+            speech_text(&[], &[embed("rich")], ""),
+            "Compartido una imagen"
+        );
         // A link preview isn't announced when the message has text of its own.
-        assert_eq!(speech_text(&[], &[embed("rich")], "https://youtu.be/x"), "Link de youtube");
+        assert_eq!(
+            speech_text(&[], &[embed("rich")], "https://youtu.be/x"),
+            "Link de youtube"
+        );
         assert_eq!(speech_text(&[], &[], ""), "");
     }
 
     #[test]
     fn display() {
-        assert_eq!(display_text(&[], &[], "mira https://youtube.com/x"), "mira [Link de youtube]");
-        assert_eq!(display_text(&[att(Some("image/png"), "")], &[], "mira esto"), "mira esto [Imagen]");
-        assert_eq!(display_text(&[att(Some("image/gif"), "a.gif")], &[], ""), "[GIF]");
+        assert_eq!(
+            display_text(&[], &[], "mira https://youtube.com/x"),
+            "mira [Link de youtube]"
+        );
+        assert_eq!(
+            display_text(&[att(Some("image/png"), "")], &[], "mira esto"),
+            "mira esto [Imagen]"
+        );
+        assert_eq!(
+            display_text(&[att(Some("image/gif"), "a.gif")], &[], ""),
+            "[GIF]"
+        );
         assert_eq!(display_text(&[att(None, "a.pdf")], &[], ""), "[Archivo]");
         assert_eq!(display_text(&[], &[embed("gifv")], ""), "[GIF]");
         assert_eq!(display_text(&[], &[], ""), "");

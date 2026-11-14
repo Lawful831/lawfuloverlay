@@ -27,6 +27,8 @@ pub struct Config {
 
     /// Fish Audio key. Only the server holds it; empty = no Fish Audio voice.
     pub fish_api_key: String,
+    /// Optional Fish Audio voice model id (`reference_id`); empty = default voice.
+    pub fish_voice: String,
 }
 
 fn var(name: &str) -> String {
@@ -93,6 +95,7 @@ impl Config {
             tls_cert: var("WS_TLS_CERT"),
             tls_key: var("WS_TLS_KEY"),
             fish_api_key: var("FISH_API_KEY"),
+            fish_voice: var("FISH_VOICE"),
         })
     }
 }

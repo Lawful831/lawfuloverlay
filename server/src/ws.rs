@@ -90,7 +90,10 @@ impl TtsGate {
             return Err("busy");
         }
         let now = Instant::now();
-        if self.window.is_none_or(|w| now.duration_since(w) >= TTS_WINDOW) {
+        if self
+            .window
+            .is_none_or(|w| now.duration_since(w) >= TTS_WINDOW)
+        {
             self.window = Some(now);
             self.count = 0;
         }
@@ -104,7 +107,11 @@ impl TtsGate {
 
 /// Checks a `tts` request. Refusals are answered at once and cost nothing;
 /// an accepted request returns the Fish Audio handle to synthesise with.
-fn admit_tts(req: &TtsRequest, fish: Option<&Arc<Fish>>, gate: &mut TtsGate) -> Result<Arc<Fish>, &'static str> {
+fn admit_tts(
+    req: &TtsRequest,
+    fish: Option<&Arc<Fish>>,
+    gate: &mut TtsGate,
+) -> Result<Arc<Fish>, &'static str> {
     let fish = fish.ok_or("tts unavailable")?;
     let chars = req.text.chars().count();
     if chars == 0 {
@@ -283,7 +290,10 @@ impl Hub {
     }
 
     pub fn client_count(&self) -> usize {
-        self.registry.lock().unwrap_or_else(|e| e.into_inner()).total
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total
     }
 
     /// Send a payload to every connected overlay client.
@@ -385,6 +395,7 @@ where
     let config = WebSocketConfig::default()
         .max_message_size(Some(policy.max_frame_bytes))
         .max_frame_size(Some(policy.max_frame_bytes));
+    #[allow(clippy::result_large_err)]
     let callback = |req: &Request, resp: Response| {
         path = req.uri().to_string();
         origin = req
@@ -580,7 +591,10 @@ mod tests {
     #[test]
     fn report_fields_are_one_short_line() {
         assert_eq!(clean_report_field("a\nb\r\x1b[31m"), "a b  [31m");
-        assert_eq!(clean_report_field(&"x".repeat(1000)).chars().count(), TELEMETRY_FIELD_CHARS);
+        assert_eq!(
+            clean_report_field(&"x".repeat(1000)).chars().count(),
+            TELEMETRY_FIELD_CHARS
+        );
     }
 
     #[test]

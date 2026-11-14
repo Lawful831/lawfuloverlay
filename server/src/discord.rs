@@ -2,21 +2,32 @@
 //! guilds and hand them to the hub.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serenity::all::{
-    Cache, ChannelId, Client, Context, EventHandler, GatewayIntents, GuildId, Message, Ready,
+    Cache, ChannelId, Client, Context, CreateCommand, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction, Message,
+    Ready,
 };
 use serenity::async_trait;
+use songbird::SerenityInit;
 use tracing::{info, warn};
 
+use crate::fish::Fish;
 use crate::text::{display_text, image_urls, link_urls, speech_text, Attachment, Embed};
+use crate::voice::{self, speech_for_tts, Voice};
 use crate::ws::{Hub, OverlayMessage};
+
+static COMMANDS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 pub struct Handler {
     pub hub: Arc<Hub>,
     pub user_ids: HashSet<u64>,
     pub server_ids: HashSet<u64>,
+    pub fish: Option<Arc<Fish>>,
+    pub fish_voice: String,
+    pub voice: Arc<Voice>,
 }
 
 impl Handler {
@@ -41,20 +52,45 @@ fn channel_name(cache: &Cache, guild: Option<GuildId>, channel: ChannelId) -> St
                 .channels
                 .get(&channel)
                 .map(|c| c.name.clone())
-                .or_else(|| guild.threads.iter().find(|t| t.id == channel).map(|t| t.name.clone()))
+                .or_else(|| {
+                    guild
+                        .threads
+                        .iter()
+                        .find(|t| t.id == channel)
+                        .map(|t| t.name.clone())
+                })
         })
         .unwrap_or_else(|| "DM".to_string())
 }
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         info!("Logged in as {} (ID: {})", ready.user.name, ready.user.id);
         if self.server_ids.is_empty() {
             warn!("TARGET_SERVER_IDS is not set — will match all guilds.");
         }
         if self.user_ids.is_empty() {
             warn!("TARGET_USER_IDS is empty — no messages will be relayed.");
+        }
+        if !COMMANDS_REGISTERED.swap(true, Ordering::Relaxed) {
+            // Comandos por guild, no globales: los globales tardan hasta una hora
+            // en propagarse y el usuario probaría /join con el comando invisible.
+            let names = [
+                (
+                    "join",
+                    "Entra a tu canal de voz y lee los mensajes en voz alta",
+                ),
+                ("leave", "Sale del canal de voz"),
+            ];
+            for guild_id in ctx.cache.guilds() {
+                for (name, desc) in names {
+                    let builder = CreateCommand::new(name).description(desc);
+                    if let Err(e) = guild_id.create_command(&ctx.http, builder).await {
+                        warn!("Could not register /{name} in guild {guild_id}: {e}");
+                    }
+                }
+            }
         }
     }
 
@@ -66,6 +102,60 @@ impl EventHandler for Handler {
                 Some(guild) => info!("Monitoring guild: {}", guild.name),
                 None => warn!("Guild {id} not found. Ensure the bot is a member of the server."),
             }
+        }
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Interaction::Command(cmd) = interaction else {
+            return;
+        };
+        let reply = match cmd.data.name.as_str() {
+            "join" => {
+                let user_channel = cmd.guild_id.and_then(|gid| {
+                    let guild = ctx.cache.guild(gid)?;
+                    guild.voice_states.get(&cmd.user.id)?.channel_id
+                });
+                match user_channel {
+                    None => "Entra a un canal de voz primero.".to_string(),
+                    Some(ch_id) => {
+                        let ch_name = channel_name(&ctx.cache, cmd.guild_id, ch_id);
+                        match voice::join(&ctx, &self.voice, ch_id).await {
+                            Ok(()) if self.fish.is_none() => format!(
+                                "Entré a **{ch_name}**, pero la voz está apagada (falta FISH_API_KEY)."
+                            ),
+                            Ok(()) => format!("Entré a **{ch_name}**, sordo y listo para leer."),
+                            Err(e) => {
+                                warn!("Failed to join voice channel {ch_id}: {e}");
+                                format!("No pude entrar a **{ch_name}**: {e}")
+                            }
+                        }
+                    }
+                }
+            }
+            "leave" => {
+                if self.voice.channel().is_none() {
+                    "No estoy en ningún canal.".to_string()
+                } else {
+                    if let Err(e) = voice::leave(&ctx, &self.voice).await {
+                        warn!("Failed to leave voice channel: {e}");
+                    }
+                    "Salí del canal de voz.".to_string()
+                }
+            }
+            _ => return,
+        };
+
+        let msg = CreateInteractionResponseMessage::new()
+            .content(reply)
+            .ephemeral(true);
+        if let Err(e) = cmd
+            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .await
+        {
+            warn!(
+                "Could not send interaction response for /{}: {e}",
+                cmd.data.name
+            );
         }
     }
 
@@ -109,7 +199,11 @@ impl EventHandler for Handler {
 
         let speech = speech_text(&attachments, &embeds, content);
         let display = display_text(&attachments, &embeds, content);
-        let shown = if display.is_empty() { speech.clone() } else { display };
+        let shown = if display.is_empty() {
+            speech.clone()
+        } else {
+            display
+        };
         let images = image_urls(&attachments, &embeds, content);
 
         info!(
@@ -117,27 +211,61 @@ impl EventHandler for Handler {
             shown.chars().take(80).collect::<String>()
         );
 
-        self.hub.broadcast(&OverlayMessage::new(
-            username,
-            shown,
-            Some(speech),
-            msg.author.id.to_string(),
-            channel_name(&ctx.cache, msg.guild_id, msg.channel_id),
-        )
-        .with_media(link_urls(content), images));
+        self.hub.broadcast(
+            &OverlayMessage::new(
+                username,
+                shown,
+                Some(speech.clone()),
+                msg.author.id.to_string(),
+                channel_name(&ctx.cache, msg.guild_id, msg.channel_id),
+            )
+            .with_media(link_urls(content), images),
+        );
+
+        if self.voice.channel().is_some() && !speech.is_empty() {
+            let Some(texto) = speech_for_tts(&speech) else {
+                return;
+            };
+            let Some(fish) = self.fish.clone() else {
+                return;
+            };
+            let voice = Arc::clone(&self.voice);
+            let voice_id = self.fish_voice.clone();
+            tokio::task::spawn(async move {
+                let res =
+                    tokio::task::spawn_blocking(move || fish.synthesize(&texto, &voice_id)).await;
+                let mp3 = match res {
+                    Ok(Ok(mp3)) => mp3,
+                    Ok(Err(e)) => {
+                        warn!("Fish Audio synthesis failed: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("Fish Audio synthesis task failed: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = voice::play_mp3(&ctx, &voice, mp3).await {
+                    warn!("Voice playback failed: {e}");
+                }
+            });
+        }
     }
 }
 
-pub async fn run_bot(token: &str, handler: Handler) -> Result<(), serenity::Error> {
+pub async fn run_bot(token: &str, handler: Handler) -> Result<(), Box<serenity::Error>> {
     // MESSAGE_CONTENT is privileged: it must be toggled ON in the Dev Portal.
     // No presences or members intents are requested.
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
     info!("Starting Discord bot…");
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
-        .await?;
-    client.start().await
+        .register_songbird()
+        .await
+        .map_err(Box::new)?;
+    client.start().await.map_err(Box::new)
 }

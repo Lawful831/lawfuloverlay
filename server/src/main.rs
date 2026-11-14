@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use lawful_overlay_server::config::Config;
 use lawful_overlay_server::discord::{run_bot, Handler};
+use lawful_overlay_server::fish::Fish;
+use lawful_overlay_server::voice::Voice;
 use lawful_overlay_server::ws::{self, Hub, Policy};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -60,7 +62,11 @@ async fn run() -> Result<(), String> {
     );
 
     let hub = Arc::new(Hub::new());
-    let policy = Arc::new(Policy::from_config(&cfg));
+    let fish = Fish::new(&cfg.fish_api_key).map(Arc::new);
+    let policy = Arc::new(Policy {
+        tts: fish.clone(),
+        ..Policy::from_config(&cfg)
+    });
     if policy.tts.is_some() {
         info!("Fish Audio voices: on");
     } else {
@@ -81,6 +87,9 @@ async fn run() -> Result<(), String> {
         hub,
         user_ids: cfg.target_user_ids.clone(),
         server_ids: cfg.target_server_ids.clone(),
+        fish,
+        fish_voice: cfg.fish_voice.clone(),
+        voice: Arc::new(Voice::new()),
     };
     tokio::select! {
         _ = server => Ok(()),

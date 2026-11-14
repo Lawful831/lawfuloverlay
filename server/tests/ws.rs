@@ -17,7 +17,12 @@ async fn start(policy: Policy) -> (u16, Arc<Hub>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let hub = Arc::new(Hub::new());
-    tokio::spawn(ws::serve(listener, Arc::clone(&hub), Arc::new(policy), None));
+    tokio::spawn(ws::serve(
+        listener,
+        Arc::clone(&hub),
+        Arc::new(policy),
+        None,
+    ));
     (port, hub)
 }
 
@@ -35,10 +40,15 @@ fn policy() -> Policy {
 
 /// The close frame the server sends, as (code, reason).
 async fn expect_close(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) -> (CloseCode, String) {
     loop {
-        match timeout(Duration::from_secs(5), ws.next()).await.expect("timed out") {
+        match timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out")
+        {
             Some(Ok(Message::Close(Some(f)))) => return (f.code, f.reason.to_string()),
             Some(Ok(_)) => continue,
             other => panic!("expected a close frame, got {other:?}"),
@@ -49,30 +59,55 @@ async fn expect_close(
 #[tokio::test]
 async fn missing_or_wrong_token_is_refused() {
     let (port, _hub) = start(policy()).await;
-    for url in [format!("ws://127.0.0.1:{port}/"), format!("ws://127.0.0.1:{port}/?token=nope")] {
+    for url in [
+        format!("ws://127.0.0.1:{port}/"),
+        format!("ws://127.0.0.1:{port}/?token=nope"),
+    ] {
         let (mut ws, _) = connect_async(url).await.unwrap();
-        assert_eq!(expect_close(&mut ws).await, (CloseCode::Policy, "token required".into()));
+        assert_eq!(
+            expect_close(&mut ws).await,
+            (CloseCode::Policy, "token required".into())
+        );
     }
 }
 
 #[tokio::test]
 async fn foreign_origin_is_refused() {
     let (port, _hub) = start(policy()).await;
-    let mut req = format!("ws://127.0.0.1:{port}/?token=s3cret").into_client_request().unwrap();
-    req.headers_mut().insert("origin", "https://evil.example".parse().unwrap());
+    let mut req = format!("ws://127.0.0.1:{port}/?token=s3cret")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("origin", "https://evil.example".parse().unwrap());
     let (mut ws, _) = connect_async(req).await.unwrap();
-    assert_eq!(expect_close(&mut ws).await, (CloseCode::Policy, "origin not allowed".into()));
+    assert_eq!(
+        expect_close(&mut ws).await,
+        (CloseCode::Policy, "origin not allowed".into())
+    );
 }
 
 #[tokio::test]
 async fn authenticated_client_receives_broadcasts() {
     let (port, hub) = start(policy()).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/?token=s3cret")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/?token=s3cret"))
+        .await
+        .unwrap();
     while hub.client_count() == 0 {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    hub.broadcast(&OverlayMessage::new("ana", "hola [GIF]", Some("hola gif".into()), "42", "general"));
-    let Message::Text(text) = timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap() else {
+    hub.broadcast(&OverlayMessage::new(
+        "ana",
+        "hola [GIF]",
+        Some("hola gif".into()),
+        "42",
+        "general",
+    ));
+    let Message::Text(text) = timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    else {
         panic!("expected a text frame");
     };
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -101,11 +136,16 @@ async fn connection_cap_refuses_with_1013() {
 async fn frame_flood_is_closed_with_1008() {
     use futures_util::SinkExt;
     let (port, _hub) = start(policy()).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/?token=s3cret")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/?token=s3cret"))
+        .await
+        .unwrap();
     for _ in 0..50 {
         if ws.send(Message::text("x")).await.is_err() {
             break;
         }
     }
-    assert_eq!(expect_close(&mut ws).await, (CloseCode::Policy, "rate limit".into()));
+    assert_eq!(
+        expect_close(&mut ws).await,
+        (CloseCode::Policy, "rate limit".into())
+    );
 }

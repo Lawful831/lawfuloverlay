@@ -133,7 +133,10 @@ impl Fish {
 
     /// Counts a call against today's cap (UTC day), or refuses it.
     fn take_daily_call(&self) -> Result<(), String> {
-        let day = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0);
+        let day = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() / 86_400)
+            .unwrap_or(0);
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if st.day != day {
             st.day = day;
@@ -166,10 +169,19 @@ impl Fish {
         let status = resp.status().as_u16();
         if status != 200 {
             // `{"status": 402, "message": "..."}`
-            let detail = resp.body_mut().with_config().limit(4096).read_to_string().unwrap_or_default();
+            let detail = resp
+                .body_mut()
+                .with_config()
+                .limit(4096)
+                .read_to_string()
+                .unwrap_or_default();
             let message = serde_json::from_str::<serde_json::Value>(&detail)
                 .ok()
-                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             return Err(fail(status, message));
         }
@@ -203,7 +215,10 @@ mod tests {
     fn live_service_refuses_a_made_up_key_without_leaking_it() {
         install_tls_provider();
         let key = "not-a-real-key-0123456789";
-        let err = Fish::new(key).unwrap().synthesize("hola", "").expect_err("must be refused");
+        let err = Fish::new(key)
+            .unwrap()
+            .synthesize("hola", "")
+            .expect_err("must be refused");
         assert!(err.contains("HTTP 40"), "{err}");
         assert!(!err.contains(key), "{err}");
     }
@@ -216,7 +231,10 @@ mod tests {
 
     #[test]
     fn free_model_is_tried_when_the_paid_one_is_refused() {
-        let err = |status| FishError { status, message: String::new() };
+        let err = |status| FishError {
+            status,
+            message: String::new(),
+        };
         for status in [402, 403, 429, 500, 503] {
             assert!(err(status).free_model_may_work(), "{status}");
         }

@@ -17,7 +17,13 @@ use rand::RngExt;
 use tokio::net::TcpListener;
 use tracing::info;
 
-const FAKE_USERS: &[&str] = &["StreamerDave", "xXGamerXx", "ProPlayer99", "CoolKid2000", "MysticWizard"];
+const FAKE_USERS: &[&str] = &[
+    "StreamerDave",
+    "xXGamerXx",
+    "ProPlayer99",
+    "CoolKid2000",
+    "MysticWizard",
+];
 const FAKE_MESSAGES: &[&str] = &[
     "GG that was insane!",
     "let's go!!!",
@@ -77,7 +83,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
                     info!("Broadcasting → {user}: {text}");
-                    let msg = OverlayMessage::new(user, humanize_links(text, true), None, id.to_string(), "general");
+                    let msg = OverlayMessage::new(
+                        user,
+                        humanize_links(text, true),
+                        None,
+                        id.to_string(),
+                        "general",
+                    );
                     hub.broadcast(&msg.with_media(link_urls(text), Vec::new()));
                 }
                 tokio::time::sleep(Duration::from_secs_f64(interval.max(0.1))).await;
