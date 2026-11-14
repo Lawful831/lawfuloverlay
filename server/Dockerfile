@@ -22,6 +22,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /src/target/release/lawful-overlay-server /app/lawful-overlay-server
 
+RUN mkdir -p /app/state && chown overlay:overlay /app/state
+
 # Switch to non-root user
 USER overlay
 

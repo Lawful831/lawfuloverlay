@@ -6,16 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serenity::all::{
-    Cache, ChannelId, Client, Context, CreateCommand, EditInteractionResponse, EventHandler,
-    GatewayIntents, GuildId, Interaction, Message, Ready,
+    Cache, ChannelId, Client, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Interaction, Message, Ready,
 };
 use serenity::async_trait;
 use songbird::SerenityInit;
 use tracing::{info, warn};
 
 use crate::fish::Fish;
-use crate::text::{display_text, image_urls, link_urls, speech_text, Attachment, Embed};
-use crate::voice::{self, speech_for_tts, Voice};
+use crate::text::{
+    display_text, image_urls, link_urls, speech_text, strip_voice_templates, Attachment, Embed,
+};
+use crate::voice::{self, speech_for_tts, DefaultVoice, Voice};
 use crate::ws::{Hub, OverlayMessage};
 
 static COMMANDS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -25,7 +27,7 @@ pub struct Handler {
     pub user_ids: HashSet<u64>,
     pub server_ids: HashSet<u64>,
     pub fish: Option<Arc<Fish>>,
-    pub fish_voice: String,
+    pub default_voice: DefaultVoice,
     pub voice: Arc<Voice>,
 }
 
@@ -75,17 +77,33 @@ impl EventHandler for Handler {
         if !COMMANDS_REGISTERED.swap(true, Ordering::Relaxed) {
             // Comandos por guild, no globales: los globales tardan hasta una hora
             // en propagarse y el usuario probaría /join con el comando invisible.
-            let names = [
+            let commands = [
                 (
                     "join",
-                    "Entra a tu canal de voz y lee los mensajes en voz alta",
+                    CreateCommand::new("join")
+                        .description("Entra a tu canal de voz y lee los mensajes en voz alta"),
                 ),
-                ("leave", "Sale del canal de voz"),
+                (
+                    "leave",
+                    CreateCommand::new("leave").description("Sale del canal de voz"),
+                ),
+                (
+                    "voice",
+                    CreateCommand::new("voice")
+                        .description("Cambia la voz por defecto de Fish Audio")
+                        .add_option(
+                            CreateCommandOption::new(
+                                CommandOptionType::String,
+                                "id",
+                                "Id de 32 caracteres hexadecimales o default",
+                            )
+                            .required(true),
+                        ),
+                ),
             ];
             for guild_id in ctx.cache.guilds() {
-                for (name, desc) in names {
-                    let builder = CreateCommand::new(name).description(desc);
-                    if let Err(e) = guild_id.create_command(&ctx.http, builder).await {
+                for (name, builder) in &commands {
+                    if let Err(e) = guild_id.create_command(&ctx.http, builder.clone()).await {
                         warn!("Could not register /{name} in guild {guild_id}: {e}");
                     }
                 }
@@ -108,7 +126,7 @@ impl EventHandler for Handler {
         let Interaction::Command(cmd) = interaction else {
             return;
         };
-        if !matches!(cmd.data.name.as_str(), "join" | "leave") {
+        if !matches!(cmd.data.name.as_str(), "join" | "leave" | "voice") {
             return;
         }
         // Unirse a voz puede tardar más de los 3 s que Discord da para responder;
@@ -148,6 +166,22 @@ impl EventHandler for Handler {
                         warn!("Failed to leave voice channel: {e}");
                     }
                     "Salí del canal de voz.".to_string()
+                }
+            }
+            "voice" => {
+                let raw_id = cmd
+                    .data
+                    .options
+                    .iter()
+                    .find(|o| o.name == "id")
+                    .and_then(|o| o.value.as_str())
+                    .unwrap_or("");
+                match self.default_voice.set(raw_id) {
+                    Ok(v) if raw_id == "default" => {
+                        format!("Voz por defecto: la del servidor (`{v}`).")
+                    }
+                    Ok(v) => format!("Voz por defecto: `{v}`."),
+                    Err(e) => e,
                 }
             }
             _ => return,
@@ -228,17 +262,19 @@ impl EventHandler for Handler {
         );
 
         if self.voice.channel().is_some() && !speech.is_empty() {
-            let Some(texto) = speech_for_tts(&speech) else {
+            let (texto, one_shot) = strip_voice_templates(&speech);
+            let one_shot = one_shot.or_else(|| strip_voice_templates(content).1);
+            let Some(texto) = speech_for_tts(&texto) else {
                 return;
             };
             let Some(fish) = self.fish.clone() else {
                 return;
             };
-            let voice = Arc::clone(&self.voice);
-            let voice_id = self.fish_voice.clone();
+            let voice = one_shot.unwrap_or_else(|| self.default_voice.get());
+            let playback = Arc::clone(&self.voice);
             tokio::task::spawn(async move {
                 let res =
-                    tokio::task::spawn_blocking(move || fish.synthesize(&texto, &voice_id)).await;
+                    tokio::task::spawn_blocking(move || fish.synthesize(&texto, &voice)).await;
                 let mp3 = match res {
                     Ok(Ok(mp3)) => mp3,
                     Ok(Err(e)) => {
@@ -250,7 +286,7 @@ impl EventHandler for Handler {
                         return;
                     }
                 };
-                if let Err(e) = voice::play_mp3(&ctx, &voice, mp3).await {
+                if let Err(e) = voice::play_mp3(&ctx, &playback, mp3).await {
                     warn!("Voice playback failed: {e}");
                 }
             });

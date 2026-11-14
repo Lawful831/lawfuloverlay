@@ -1,6 +1,7 @@
 //! Unit/integration tests for `voice::speech_for_tts` and `Voice` state.
 
-use lawful_overlay_server::voice::{speech_for_tts, Voice};
+use lawful_overlay_server::text::strip_voice_templates;
+use lawful_overlay_server::voice::{speech_for_tts, DefaultVoice, Voice};
 use serenity::all::ChannelId;
 use songbird::error::{ConnectionError, JoinError};
 
@@ -48,4 +49,33 @@ fn join_error_debug_format_includes_inner_details() {
     let msg = format!("no se pudo unir al canal de voz: {driver_err:?}");
     assert!(msg.contains("Driver"), "{msg}");
     assert!(msg.contains("TimedOut"), "{msg}");
+}
+
+#[test]
+fn one_shot_takes_precedence_over_default_voice() {
+    let env_id = "11111111111111111111111111111111";
+    let cmd_id = "22222222222222222222222222222222";
+    let msg_id = "ca3007f96ae7499ab87d27ea3599956a";
+
+    let path = std::env::temp_dir()
+        .join(format!("lawful-voice-integ-{}", std::process::id()))
+        .join("voice.json");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+    let dv = DefaultVoice::new(env_id.to_string(), path.clone());
+    assert_eq!(dv.get(), env_id);
+    assert_eq!(dv.set(cmd_id).unwrap(), cmd_id);
+    assert_eq!(dv.get(), cmd_id);
+
+    let (texto, one_shot) = strip_voice_templates(&format!("//{msg_id}// hola"));
+    assert_eq!(texto, "hola");
+    let voice = one_shot.unwrap_or_else(|| dv.get());
+    assert_eq!(voice, msg_id);
+
+    let (texto2, one_shot2) = strip_voice_templates("hola sin plantilla");
+    assert_eq!(texto2, "hola sin plantilla");
+    let voice2 = one_shot2.unwrap_or_else(|| dv.get());
+    assert_eq!(voice2, cmd_id);
+
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

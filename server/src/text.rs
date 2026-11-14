@@ -218,6 +218,56 @@ pub fn image_urls(attachments: &[Attachment], embeds: &[Embed], content: &str) -
         .collect()
 }
 
+pub const VOICE_ID_LEN: usize = 32;
+
+/// Whitespace runs → one space; ends are kept.
+fn collapse(chars: impl Iterator<Item = char>) -> String {
+    let mut out = String::new();
+    for c in chars {
+        if !c.is_whitespace() {
+            out.push(c);
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// The voice id of a `//id//` template at the start of `text`.
+fn voice_template(text: &str) -> Option<&str> {
+    let id = text.strip_prefix("//")?.get(..VOICE_ID_LEN)?;
+    let after = &text[2 + VOICE_ID_LEN..];
+    let closed = after.starts_with("//") && !after[2..].starts_with('/');
+    (closed && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+}
+
+/// (texto sin plantillas, primer id encontrado)
+pub fn strip_voice_templates(text: &str) -> (String, Option<String>) {
+    let mut out = String::new();
+    let mut voice = None;
+    let mut word_start = 0;
+    let mut i = 0;
+    while let Some(c) = text[i..].chars().next() {
+        let tail = &text[i..];
+        if c.is_whitespace() {
+            word_start = i + c.len_utf8();
+        }
+        if c == '/' && !text[..i].ends_with('/') {
+            let word_end = tail.find(char::is_whitespace).map_or(text.len(), |n| i + n);
+            let in_url = text[word_start..word_end].contains("://");
+            if let Some(id) = voice_template(tail).filter(|_| !in_url) {
+                voice.get_or_insert_with(|| id.to_ascii_lowercase());
+                out.push(' ');
+                i += VOICE_ID_LEN + 4;
+                continue;
+            }
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    (collapse(out.chars()).trim_matches(' ').to_string(), voice)
+}
+
 fn join_parts(parts: &[String]) -> String {
     parts
         .iter()
@@ -229,6 +279,8 @@ fn join_parts(parts: &[String]) -> String {
 
 /// Overlay text: links and attachments tagged, original text kept.
 pub fn display_text(attachments: &[Attachment], embeds: &[Embed], content: &str) -> String {
+    let (clean, _) = strip_voice_templates(content);
+    let content = clean.as_str();
     let mut parts = Vec::new();
     if !content.is_empty() {
         parts.push(humanize_links(content, true));
@@ -241,6 +293,8 @@ pub fn display_text(attachments: &[Attachment], embeds: &[Embed], content: &str)
 
 /// Text to be spoken: readable links plus an announcement for media.
 pub fn speech_text(attachments: &[Attachment], embeds: &[Embed], content: &str) -> String {
+    let (clean, _) = strip_voice_templates(content);
+    let content = clean.as_str();
     let mut parts = Vec::new();
     if !content.is_empty() {
         parts.push(humanize_links(content, false));
@@ -395,5 +449,62 @@ mod tests {
         assert_eq!(display_text(&[att(None, "a.pdf")], &[], ""), "[Archivo]");
         assert_eq!(display_text(&[], &[embed("gifv")], ""), "[GIF]");
         assert_eq!(display_text(&[], &[], ""), "");
+        assert_eq!(
+            display_text(&[], &[], &format!("//{ID}// mira https://youtube.com/x")),
+            "mira [Link de youtube]"
+        );
+    }
+
+    const ID: &str = "ca3007f96ae7499ab87d27ea3599956a";
+    const ID2: &str = "9a9cf47702da476aa4629e2506d4a857";
+
+    #[test]
+    fn voice_templates_start_middle_and_lowercase() {
+        assert_eq!(
+            strip_voice_templates(&format!("//{ID}// hola mundo")),
+            ("hola mundo".to_string(), Some(ID.to_string()))
+        );
+        assert_eq!(
+            strip_voice_templates(&format!("hola //{}// mundo", ID.to_uppercase())),
+            ("hola mundo".to_string(), Some(ID.to_string()))
+        );
+        assert_eq!(
+            strip_voice_templates(&format!("hola//{}//mundo", ID.to_uppercase())),
+            ("hola mundo".to_string(), Some(ID.to_string()))
+        );
+        assert_eq!(
+            strip_voice_templates("sin plantilla"),
+            ("sin plantilla".to_string(), None)
+        );
+        assert_eq!(
+            speech_text(&[], &[], &format!("//{ID}// hola mundo")),
+            "hola mundo"
+        );
+    }
+
+    #[test]
+    fn voice_templates_first_wins_and_all_are_stripped() {
+        assert_eq!(
+            strip_voice_templates(&format!("a //{ID}// b //{ID2}// c")),
+            ("a b c".to_string(), Some(ID.to_string()))
+        );
+    }
+
+    #[test]
+    fn voice_templates_reject_wrong_len_and_urls() {
+        for text in [
+            "https://example.com//x//".to_string(),
+            format!("https://example.com//{ID}//"),
+            format!("https://{ID}//"),
+            format!("//{}//", &ID[..31]),  // 31 chars
+            format!("//{ID}0//"),          // 33 chars
+            format!("//{}g//", &ID[..31]), // non-hex
+            format!("///{ID}//"),
+            format!("//{ID}///"),
+            format!("//{ID}/"),
+            "// comentario // normal".to_string(),
+        ] {
+            assert_eq!(strip_voice_templates(&text), (text.clone(), None), "{text}");
+        }
     }
 }

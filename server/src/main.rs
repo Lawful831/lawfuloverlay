@@ -4,7 +4,7 @@ use std::sync::Arc;
 use lawful_overlay_server::config::Config;
 use lawful_overlay_server::discord::{run_bot, Handler};
 use lawful_overlay_server::fish::Fish;
-use lawful_overlay_server::voice::Voice;
+use lawful_overlay_server::voice::{DefaultVoice, Voice};
 use lawful_overlay_server::ws::{self, Hub, Policy};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -88,7 +88,7 @@ async fn run() -> Result<(), String> {
         user_ids: cfg.target_user_ids.clone(),
         server_ids: cfg.target_server_ids.clone(),
         fish,
-        fish_voice: cfg.fish_voice.clone(),
+        default_voice: DefaultVoice::new(cfg.fish_voice.clone(), cfg.voice_state_path.clone()),
         voice: Arc::new(Voice::new()),
     };
     tokio::select! {

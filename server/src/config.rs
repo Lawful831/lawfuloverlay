@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fmt::Display;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,8 @@ pub struct Config {
     pub fish_api_key: String,
     /// Optional Fish Audio voice model id (`reference_id`); empty = default voice.
     pub fish_voice: String,
+    /// Path where `/voice` persists the default voice across container restarts.
+    pub voice_state_path: PathBuf,
 }
 
 fn var(name: &str) -> String {
@@ -79,6 +82,10 @@ impl Config {
             h if h.is_empty() => "0.0.0.0".to_string(),
             h => h,
         };
+        let voice_state_path = match var("VOICE_STATE_PATH") {
+            p if p.trim().is_empty() => PathBuf::from("/app/state/voice.json"),
+            p => PathBuf::from(p),
+        };
 
         Ok(Self {
             bot_token: var("DISCORD_BOT_TOKEN"),
@@ -96,6 +103,7 @@ impl Config {
             tls_key: var("WS_TLS_KEY"),
             fish_api_key: var("FISH_API_KEY"),
             fish_voice: var("FISH_VOICE"),
+            voice_state_path,
         })
     }
 }
