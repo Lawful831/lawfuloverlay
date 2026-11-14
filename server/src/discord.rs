@@ -6,9 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serenity::all::{
-    Cache, ChannelId, Client, Context, CreateCommand, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction, Message,
-    Ready,
+    Cache, ChannelId, Client, Context, CreateCommand, EditInteractionResponse, EventHandler,
+    GatewayIntents, GuildId, Interaction, Message, Ready,
 };
 use serenity::async_trait;
 use songbird::SerenityInit;
@@ -109,6 +108,15 @@ impl EventHandler for Handler {
         let Interaction::Command(cmd) = interaction else {
             return;
         };
+        if !matches!(cmd.data.name.as_str(), "join" | "leave") {
+            return;
+        }
+        // Unirse a voz puede tardar más de los 3 s que Discord da para responder;
+        // sin diferir, el usuario ve "Unknown interaction" y el resultado se pierde.
+        if let Err(e) = cmd.defer_ephemeral(&ctx.http).await {
+            warn!("Could not defer interaction for /{}: {e}", cmd.data.name);
+            return;
+        }
         let reply = match cmd.data.name.as_str() {
             "join" => {
                 let user_channel = cmd.guild_id.and_then(|gid| {
@@ -145,11 +153,8 @@ impl EventHandler for Handler {
             _ => return,
         };
 
-        let msg = CreateInteractionResponseMessage::new()
-            .content(reply)
-            .ephemeral(true);
         if let Err(e) = cmd
-            .create_response(&ctx.http, CreateInteractionResponse::Message(msg))
+            .edit_response(&ctx.http, EditInteractionResponse::new().content(reply))
             .await
         {
             warn!(
